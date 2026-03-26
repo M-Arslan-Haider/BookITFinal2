@@ -62,7 +62,8 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   late final attendanceViewModel = Get.put(AttendanceViewModel());
   late final attendanceOutViewModel = Get.put(AttendanceOutViewModel());
   late final signUpController = Get.put(SignUpController());
-  final LocationViewModel locationVM = Get.find<LocationViewModel>();
+  // final LocationViewModel locationVM = Get.find<LocationViewModel>();
+  late final LocationViewModel locationVM;
 
   String user_id = '';
   String userName = '';
@@ -70,6 +71,10 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
+    // ✅ Initialize LocationViewModel safely
+    locationVM = Get.isRegistered<LocationViewModel>()
+        ? Get.find<LocationViewModel>()
+        : Get.put(LocationViewModel());
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ForceUpdateService.check(context);

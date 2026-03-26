@@ -237,25 +237,49 @@
 //     return total;
 //   }
 //
-//   // ✅ FIXED: With synchronization and atomic operations
-//   Future<void> consolidateDailyGPXData() async {
-//     try {
-//       final date = DateFormat('dd-MM-yyyy').format(DateTime.now());
-//       final downloadDirectory = await getDownloadsDirectory();
-//       final dailyGPXFilePath = '${downloadDirectory!.path}/track$date.gpx';
+//   // ✅ HELPER METHOD: Check if point already exists in list (MOVED HERE to fix error)
+//   bool _containsPoint(List<Wpt> points, Wpt newPoint) {
+//     for (Wpt point in points) {
+//       if (point.lat == newPoint.lat &&
+//           point.lon == newPoint.lon &&
+//           point.time == newPoint.time) {
+//         return true;
+//       }
+//     }
+//     return false;
+//   }
 //
-//       debugPrint("🔄 Starting Daily GPX Consolidation for: $date");
+//   // ----------------------
+//   // ✅ NEW: Date-specific GPX Methods for Midnight Auto-Clockout Fix
+//   // ----------------------
+//
+//   // ✅ NEW: Get GPX file path for specific date (not current date)
+//   Future<String> getGPXFilePathForDate(DateTime date) async {
+//     final dateStr = DateFormat('dd-MM-yyyy').format(date);
+//     final downloadDirectory = await getDownloadsDirectory();
+//     return "${downloadDirectory!.path}/track_${user_id}_$dateStr.gpx";
+//   }
+//
+//   // ✅ NEW: Consolidate GPX for specific date (CRITICAL FIX for midnight auto-clockout)
+//   Future<void> consolidateDailyGPXDataForDate(DateTime eventDate) async {
+//     try {
+//       final dateStr = DateFormat('dd-MM-yyyy').format(eventDate);
+//       final downloadDirectory = await getDownloadsDirectory();
+//       final dailyGPXFilePath = '${downloadDirectory!.path}/track$dateStr.gpx';
+//
+//       debugPrint("🔄 [DATE-SPECIFIC] Starting Daily GPX Consolidation for: $dateStr");
+//       debugPrint("🔄 [DATE-SPECIFIC] File path: $dailyGPXFilePath");
 //
 //       // ✅ Use lock for entire consolidation process
 //       await _fileReadLock.synchronized(() async {
 //         File dailyFile = File(dailyGPXFilePath);
 //
 //         if (!await dailyFile.exists()) {
-//           debugPrint("📄 Daily file doesn't exist, creating new one");
+//           debugPrint("📄 [DATE-SPECIFIC] Daily file doesn't exist, creating new one");
 //           String initialGPX = '''<?xml version="1.0" encoding="UTF-8"?>
 // <gpx version="1.1" creator="OrderBookingApp">
 //   <trk>
-//     <name>Daily Track $date</name>
+//     <name>Daily Track $dateStr</name>
 //     <trkseg>
 //     </trkseg>
 //   </trk>
@@ -277,10 +301,10 @@
 //         Trkseg mainSegment = dailyGpx.trks.first.trksegs.first;
 //         int initialPoints = mainSegment.trkpts.length;
 //
-//         debugPrint("📊 Initial points in daily file: $initialPoints");
+//         debugPrint("📊 [DATE-SPECIFIC] Initial points in daily file: $initialPoints");
 //
-//         List<File> allGPXFiles = await _findAllTodayGPXFiles(downloadDirectory, date);
-//         debugPrint("📁 Found ${allGPXFiles.length} GPX files for today");
+//         List<File> allGPXFiles = await _findAllGPXFilesForDate(downloadDirectory, dateStr);
+//         debugPrint("📁 [DATE-SPECIFIC] Found ${allGPXFiles.length} GPX files for date: $dateStr");
 //
 //         int totalMergedPoints = 0;
 //
@@ -301,9 +325,9 @@
 //                 }
 //               }
 //
-//               debugPrint("✅ Merged ${tempFile.path}");
+//               debugPrint("✅ [DATE-SPECIFIC] Merged ${tempFile.path}");
 //             } catch (e) {
-//               debugPrint("⚠️ Error merging ${tempFile.path}: $e");
+//               debugPrint("⚠️ [DATE-SPECIFIC] Error merging ${tempFile.path}: $e");
 //             }
 //           }
 //         }
@@ -316,19 +340,19 @@
 //         String consolidatedGPX = GpxWriter().asString(dailyGpx);
 //         await dailyFile.writeAsString(consolidatedGPX, flush: true);
 //
-//         debugPrint("🎉 DAILY CONSOLIDATION COMPLETED");
-//         debugPrint("📈 Points: $initialPoints → ${mainSegment.trkpts.length}");
-//         debugPrint("🔄 Merged: $totalMergedPoints new points");
+//         debugPrint("🎉 [DATE-SPECIFIC] DAILY CONSOLIDATION COMPLETED for: $dateStr");
+//         debugPrint("📈 [DATE-SPECIFIC] Points: $initialPoints → ${mainSegment.trkpts.length}");
+//         debugPrint("🔄 [DATE-SPECIFIC] Merged: $totalMergedPoints new points");
 //       });
 //
 //     } catch (e) {
-//       debugPrint("❌ Error in daily consolidation: $e");
+//       debugPrint("❌ [DATE-SPECIFIC] Error in daily consolidation for date: $e");
 //     }
 //   }
 //
-//   // ✅ FIXED: All async, no sync calls
-//   Future<List<File>> _findAllTodayGPXFiles(Directory directory, String date) async {
-//     List<File> todayFiles = [];
+//   // ✅ NEW: Find all GPX files for specific date
+//   Future<List<File>> _findAllGPXFilesForDate(Directory directory, String dateStr) async {
+//     List<File> dateFiles = [];
 //
 //     try {
 //       List<FileSystemEntity> entities = await directory.list().toList();
@@ -337,45 +361,103 @@
 //         if (entity is File && entity.path.endsWith('.gpx')) {
 //           String fileName = entity.path.split('/').last;
 //
-//           if (fileName.contains(date) || await _isFileFromToday(entity)) {
-//             todayFiles.add(entity);
+//           // Check if filename contains the specific date
+//           if (fileName.contains(dateStr)) {
+//             dateFiles.add(entity);
 //           }
 //         }
 //       }
 //     } catch (e) {
-//       debugPrint("❌ Error finding today's files: $e");
+//       debugPrint("❌ [DATE-SPECIFIC] Error finding files for date $dateStr: $e");
 //     }
 //
-//     return todayFiles;
+//     return dateFiles;
 //   }
 //
-//   // ✅ FIXED: Async file modification check
-//   Future<bool> _isFileFromToday(File file) async {
+//   // ✅ NEW: Save location data for specific date (CRITICAL FIX for midnight auto-clockout)
+//   Future<void> saveLocationFromConsolidatedFileForDate(DateTime eventDate) async {
 //     try {
-//       DateTime fileTime = await file.lastModified();
-//       DateTime today = DateTime.now();
+//       final dateStr = DateFormat('dd-MM-yyyy').format(eventDate);
+//       final downloadDirectory = await getDownloadsDirectory();
+//       final consolidatedGPXFilePath = '${downloadDirectory!.path}/track$dateStr.gpx';
+//       final consolidatedFile = File(consolidatedGPXFilePath);
 //
-//       return fileTime.year == today.year &&
-//           fileTime.month == today.month &&
-//           fileTime.day == today.day;
+//       debugPrint("💾 [DATE-SPECIFIC] Saving location data for date: $dateStr");
+//       debugPrint("💾 [DATE-SPECIFIC] File path: $consolidatedGPXFilePath");
+//
+//       if (!await consolidatedFile.exists()) {
+//         debugPrint('❌ [DATE-SPECIFIC] Consolidated GPX file does not exist: $consolidatedGPXFilePath');
+//         return;
+//       }
+//
+//       double totalDistance = await calculateTotalDistance(consolidatedGPXFilePath);
+//
+//       // ✅ Use lock for reading bytes
+//       List<int> gpxBytesList = await _fileReadLock.synchronized(() async {
+//         return await consolidatedFile.readAsBytes();
+//       });
+//
+//       Uint8List gpxBytes = Uint8List.fromList(gpxBytesList);
+//
+//       await _loadCounter();
+//       final orderSerial = generateNewOrderId(user_id);
+//
+//       await addLocation(LocationModel(
+//         location_id: orderSerial.toString(),
+//         user_id: user_id.toString(),
+//         total_distance: totalDistance.toString(),
+//         file_name: "$dateStr.gpx", // ✅ CRITICAL: Use event date for filename
+//         booker_name: userName,
+//         body: gpxBytes,
+//       ));
+//
+//       await locationRepository.postDataFromDatabaseToAPI();
+//
+//       debugPrint("✅ [DATE-SPECIFIC] Location data saved from CONSOLIDATED file");
+//       debugPrint("📁 [DATE-SPECIFIC] File: $dateStr.gpx");
+//       debugPrint("📏 [DATE-SPECIFIC] Distance: $totalDistance km");
+//
 //     } catch (e) {
-//       return false;
+//       debugPrint("❌ [DATE-SPECIFIC] Error in saveLocationFromConsolidatedFileForDate: $e");
 //     }
 //   }
 //
-//   bool _containsPoint(List<Wpt> points, Wpt newPoint) {
-//     for (Wpt point in points) {
-//       if (point.lat == newPoint.lat &&
-//           point.lon == newPoint.lon &&
-//           point.time == newPoint.time) {
-//         return true;
+//   // ✅ NEW: Calculate distance for specific date file
+//   Future<double> calculateTotalDistanceForDate(DateTime date) async {
+//     try {
+//       final dateStr = DateFormat('dd-MM-yyyy').format(date);
+//       final downloadDirectory = await getDownloadsDirectory();
+//       final filePath = "${downloadDirectory!.path}/track_${user_id}_$dateStr.gpx";
+//
+//       File file = File(filePath);
+//
+//       if (!await file.exists()) {
+//         return 0.0;
 //       }
+//
+//       double distance = await _fileReadLock.synchronized(() async {
+//         return await calculateTotalDistance(filePath);
+//       });
+//
+//       return distance;
+//     } catch (e) {
+//       debugPrint("❌ [DATE-SPECIFIC] Error calculating distance for date: $e");
+//       return 0.0;
 //     }
-//     return false;
+//   }
+//
+//   // ✅ FIXED: Original method - now delegates to date-specific method with current date
+//   Future<void> consolidateDailyGPXData() async {
+//     await consolidateDailyGPXDataForDate(DateTime.now());
+//   }
+//
+//   // ✅ FIXED: Original method - now delegates to date-specific method with current date
+//   Future<void> saveLocationFromConsolidatedFile() async {
+//     await saveLocationFromConsolidatedFileForDate(DateTime.now());
 //   }
 //
 //   // ----------------------
-//   // Location Saving Methods
+//   // Location Saving Methods (Original - Kept for compatibility)
 //   // ----------------------
 //
 //   // ✅ FIXED: With proper async flow and error handling
@@ -425,48 +507,6 @@
 //
 //     } catch (e) {
 //       debugPrint("❌ Error in saveLocation: $e");
-//     }
-//   }
-//
-//   Future<void> saveLocationFromConsolidatedFile() async {
-//     SharedPreferences prefs = await SharedPreferences.getInstance();
-//     final date = DateFormat('dd-MM-yyyy').format(DateTime.now());
-//     final downloadDirectory = await getDownloadsDirectory();
-//     final consolidatedGPXFilePath = '${downloadDirectory!.path}/track$date.gpx';
-//     final consolidatedFile = File(consolidatedGPXFilePath);
-//
-//     if (!consolidatedFile.existsSync()) {
-//       debugPrint('❌ Consolidated GPX file does not exist');
-//       return;
-//     }
-//
-//     try {
-//       double totalDistance = await calculateTotalDistance(consolidatedGPXFilePath);
-//       await prefs.setDouble('totalDistance', totalDistance);
-//
-//       List<int> gpxBytesList = await consolidatedFile.readAsBytes();
-//       Uint8List gpxBytes = Uint8List.fromList(gpxBytesList);
-//
-//       await _loadCounter();
-//       final orderSerial = generateNewOrderId(user_id);
-//
-//       await addLocation(LocationModel(
-//         location_id: orderSerial.toString(),
-//         user_id: user_id.toString(),
-//         total_distance: totalDistance.toString(),
-//         file_name: "$date.gpx",
-//         booker_name: userName,
-//         body: gpxBytes,
-//       ));
-//
-//       await locationRepository.postDataFromDatabaseToAPI();
-//
-//       debugPrint("✅ Location data saved from CONSOLIDATED file");
-//       debugPrint("📁 File: $date.gpx");
-//       debugPrint("📏 Distance: $totalDistance km");
-//
-//     } catch (e) {
-//       debugPrint("❌ Error in saveLocationFromConsolidatedFile: $e");
 //     }
 //   }
 //
@@ -965,6 +1005,10 @@
 //     }
 //   }
 // }
+//
+//
+//
+//
 
 import 'dart:async';
 import 'dart:convert';
@@ -1037,6 +1081,8 @@ class LocationViewModel extends GetxController {
       _startGpxAutoSync();
     });
 
+    // ✅ NEW: Restore location if app was force-killed right after clockout
+    _restorePendingLocationIfNeeded();
   }
 
   @override
@@ -1420,7 +1466,17 @@ class LocationViewModel extends GetxController {
 
   // ✅ FIXED: Original method - now delegates to date-specific method with current date
   Future<void> saveLocationFromConsolidatedFile() async {
+    // ✅ Mark as pending BEFORE doing any work so we can restore if app is killed
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('hasPendingLocationSync', true);
+    await prefs.setString(
+        'pendingLocationSyncDate', DateFormat('dd-MM-yyyy').format(DateTime.now()));
+
     await saveLocationFromConsolidatedFileForDate(DateTime.now());
+
+    // ✅ Clear flag after successful save
+    await prefs.setBool('hasPendingLocationSync', false);
+    await prefs.remove('pendingLocationSyncDate');
   }
 
   // ----------------------
@@ -1929,6 +1985,44 @@ class LocationViewModel extends GetxController {
   }
 
   // ===============================
+// 🔄 RESTORE PENDING LOCATION ON STARTUP
+// ===============================
+
+  /// ✅ NEW: If app was force-killed immediately after clockout before location
+  /// could be saved/posted, this restores and posts it on next app open.
+  Future<void> _restorePendingLocationIfNeeded() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      bool hasPending = prefs.getBool('hasPendingLocationSync') ?? false;
+
+      if (!hasPending) return;
+
+      debugPrint("🔄 [LOCATION RESTORE] Pending location sync found — restoring...");
+
+      // Get the date on which clockout happened
+      String? dateStr = prefs.getString('pendingLocationSyncDate');
+      DateTime eventDate = dateStr != null
+          ? DateFormat('dd-MM-yyyy').tryParse(dateStr) ?? DateTime.now()
+          : DateTime.now();
+
+      debugPrint("📅 [LOCATION RESTORE] Restoring for date: $dateStr");
+
+      // Consolidate any GPX fragments for that date, then save + post
+      await consolidateDailyGPXDataForDate(eventDate);
+      await saveLocationFromConsolidatedFileForDate(eventDate);
+
+      // Clear the pending flag
+      await prefs.setBool('hasPendingLocationSync', false);
+      await prefs.remove('pendingLocationSyncDate');
+
+      debugPrint("✅ [LOCATION RESTORE] Completed for date: $dateStr");
+    } catch (e) {
+      debugPrint("❌ [LOCATION RESTORE] Error: $e");
+      // Leave the flag set so we retry on next startup
+    }
+  }
+
+// ===============================
 // 🚀 START GPX AUTO SYNC TIMER
 // ===============================
   void _startGpxAutoSync() {

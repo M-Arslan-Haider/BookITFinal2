@@ -107,7 +107,7 @@ const String leaveTable = 'leaveTable';
 //   }
 //   return false;
 // }
-String  version="v0.1.7";
+String  version="v0.1.8";
 dynamic shopAddress = "";
 
 Future<bool> isNetworkAvailable() async {
