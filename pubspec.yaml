@@ -62,7 +62,6 @@ dependencies:
   permission_handler: ^11.3.1
   responsive_framework: ^1.5.1
   flutter_searchable_dropdown: ^2.0.0
-  rive: ^0.13.14
   rxdart: ^0.28.0
   dropdown_search: ^5.0.3
   dropdown_button2: ^2.3.9
@@ -163,10 +162,7 @@ flutter:
   assets:
    - assets/images/
    - assets/icons/
-   - assets/samples/ui/rive_app/rive/
-   - assets/samples/ui/rive_app/images/
-   - assets/samples/ui/rive_app/images/avatars/
-   - assets/samples/ui/rive_app/images/backgrounds/
+
 
 
   # An image asset can refer to one or more resolution-specific "variants", see
