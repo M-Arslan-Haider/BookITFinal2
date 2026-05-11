@@ -35,6 +35,7 @@ String userNameDISPATCHER="";
 bool newIsClockedIn= false;
 String pageName="";
 String companyName="";
+String companyCode="";  // ✅ ADD THIS
 String? erpWorkSpace;
 
 
@@ -79,6 +80,10 @@ const locationClusters = 'locationClusters';
 
 const String centralPoints = 'centralPoints';
 const String leaveTable = 'leaveTable';
+const String locationTrackingTable = 'location_tracking';
+const String loginTrackingTable = 'loginTrackingTable';  // ✅ ADD THIS LINE
+const String fakeGpsTable = 'fake_gps_logs';
+// const String fakeGpsTable = "fake_gps_logs";
 // const visit_logs = 'visit_logs';
 
 
@@ -107,7 +112,7 @@ const String leaveTable = 'leaveTable';
 //   }
 //   return false;
 // }
-String  version="v0.1.8";
+String  version="v0.3.3";
 dynamic shopAddress = "";
 
 Future<bool> isNetworkAvailable() async {

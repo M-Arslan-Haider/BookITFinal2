@@ -174,24 +174,103 @@ class AttendanceRepository {
         .delete(attendanceTableName, where: 'attendance_in_id = ?', whereArgs: [id]);
   }
 
+  // Future<void> serialNumberGeneratorApi() async {
+  //   await Config.fetchLatestConfig();
+  //   SharedPreferences prefs = await SharedPreferences.getInstance();
+  //   final orderDetailsGenerator = SerialNumberGenerator(
+  //     apiUrl:
+  //     '${Config.getApiUrlServerIP}${Config.getApiUrlERPCompanyName}${Config.getApiUrlAttendanceInSerial}$user_id',
+  //     maxColumnName: 'max(attendance_in_id)',
+  //     serialType: attendanceInHighestSerial,
+  //   );
+  //   await orderDetailsGenerator.getAndIncrementSerialNumber();
+  //   attendanceInHighestSerial = orderDetailsGenerator.serialType;
+  //   await prefs.setInt("attendanceInHighestSerial", attendanceInHighestSerial!);
+  // }
+
   Future<void> serialNumberGeneratorApi() async {
-    await Config.fetchLatestConfig();
-    SharedPreferences prefs = await SharedPreferences.getInstance();
-    final orderDetailsGenerator = SerialNumberGenerator(
-      apiUrl:
-      '${Config.getApiUrlServerIP}${Config.getApiUrlERPCompanyName}${Config.getApiUrlAttendanceInSerial}$user_id',
-      maxColumnName: 'max(attendance_in_id)',
-      serialType: attendanceInHighestSerial,
-    );
-    await orderDetailsGenerator.getAndIncrementSerialNumber();
-    attendanceInHighestSerial = orderDetailsGenerator.serialType;
-    await prefs.setInt("attendanceInHighestSerial", attendanceInHighestSerial!);
+    try {
+      SharedPreferences prefs = await SharedPreferences.getInstance();
+
+      // 1. Get max serial from SERVER (survives reinstall)
+      int serverSerial = await fetchMaxSerialFromServer();
+
+      // 2. Get local serial from SharedPreferences (offline fallback)
+      int localSerial = prefs.getInt('attendanceInHighestSerial') ?? 0;
+
+      // 3. Use whichever is HIGHER — server always wins after reinstall
+      int maxSerial = serverSerial > localSerial ? serverSerial : localSerial;
+
+      // 4. New serial = max + 1
+      attendanceInHighestSerial = maxSerial + 1;
+
+      // 5. Save locally so offline works too
+      await prefs.setInt('attendanceInHighestSerial', attendanceInHighestSerial!);
+
+      debugPrint('🔢 [REPO-IN] Server=$serverSerial | Local=$localSerial '
+          '→ New serial=${attendanceInHighestSerial}');
+
+    } catch (e) {
+      debugPrint('❌ [REPO-IN] serialNumberGeneratorApi error: $e');
+      // Fallback: increment local serial only
+      SharedPreferences prefs = await SharedPreferences.getInstance();
+      attendanceInHighestSerial = (prefs.getInt('attendanceInHighestSerial') ?? 0) + 1;
+      await prefs.setInt('attendanceInHighestSerial', attendanceInHighestSerial!);
+    }
   }
+
 
   // ✅ Added: Load saved serial on startup or before saving
   Future<void> loadLatestSerial() async {
     SharedPreferences prefs = await SharedPreferences.getInstance();
     attendanceInHighestSerial = prefs.getInt("attendanceInHighestSerial") ?? 0;
     debugPrint('🔢 Loaded latest serial: $attendanceInHighestSerial');
+  }
+
+  /// Calls AttendanceInSerialGetUrl → gets max existing serial from server
+  /// Returns 0 if no records exist or on error
+  Future<int> fetchMaxSerialFromServer() async {
+    try {
+      await Config.fetchLatestConfig();
+      final String url =
+          '${Config.getApiUrlServerIP}${Config.getApiUrlERPCompanyName}'
+          '${Config.getApiUrlAttendanceInSerial}$user_id';
+
+      debugPrint('📡 [REPO-IN] fetchMaxSerial → $url');
+
+      final response = await http
+          .get(Uri.parse(url), headers: {'Accept': 'application/json'})
+          .timeout(const Duration(seconds: 15));
+
+      debugPrint('📡 [REPO-IN] fetchMaxSerial status: ${response.statusCode}');
+      debugPrint('📡 [REPO-IN] fetchMaxSerial body: ${response.body}');
+
+      if (response.statusCode != 200) return 0;
+
+      final decoded = jsonDecode(response.body);
+
+      String? maxId;
+      if (decoded is Map<String, dynamic>) {
+        final items = decoded['items'];
+        if (items is List && items.isNotEmpty && items.first is Map) {
+          maxId = (items.first as Map)['max(attendance_in_id)']?.toString();
+        }
+      }
+
+      if (maxId == null || maxId.isEmpty || maxId == 'null') {
+        debugPrint('ℹ️ [REPO-IN] No records on server → serial starts at 0');
+        return 0;
+      }
+
+      // Parse the last numeric part of the ID
+      final parts = maxId.split('-');
+      final serial = int.tryParse(parts.last.trim()) ?? 0;
+      debugPrint('✅ [REPO-IN] Server maxId=$maxId → serial=$serial');
+      return serial;
+
+    } catch (e) {
+      debugPrint('⚠️ [REPO-IN] fetchMaxSerial error: $e');
+      return 0;
+    }
   }
 }

@@ -13,7 +13,6 @@ import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:order_booking_app/ViewModels/shop_visit_details_view_model.dart';
 import '../Databases/util.dart';
-import '../LocatioPoints/ravelTimeViewModel.dart';
 import '../Models/HeadsShopVistModels.dart';
 import '../Models/add_shop_model.dart';
 import '../Models/shop_visit_model.dart';
@@ -42,7 +41,6 @@ class ShopVisitViewModel extends GetxController {
   final TextEditingController ownerNameController = TextEditingController();
   final TextEditingController bookerNameController = TextEditingController();
   final feedBackController = TextEditingController();
-  final TravelTimeViewModel travelTimeViewModel = Get.find<TravelTimeViewModel>();///added
 
   var shop_address = ''.obs;
   var owner_name = ''.obs;
@@ -90,20 +88,7 @@ class ShopVisitViewModel extends GetxController {
     fetchTotalShopVisit();
     updateButtonReadiness();
   }
-  /// ✅ Added onReady to set working screen status
-  @override
-  void onReady() {
-    super.onReady();
-    travelTimeViewModel.setWorkingScreenStatus(true);
-  }
 
-  /// ✅ Updated onClose to unset working screen status abduallah
-  @override
-  void onClose() {
-    travelTimeViewModel.setWorkingScreenStatus(false);
-    feedBackController.dispose();
-    super.onClose();
-  }
   ///====19-10-2025////
   // @override
   //

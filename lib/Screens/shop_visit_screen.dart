@@ -2641,7 +2641,6 @@
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:order_booking_app/ViewModels/ProductsViewModel.dart';
-import '../LocatioPoints/ravelTimeViewModel.dart';
 import '../ViewModels/location_view_model.dart';
 import '../ViewModels/shop_visit_details_view_model.dart';
 import '../ViewModels/shop_visit_view_model.dart';
@@ -2677,11 +2676,6 @@ class _StateShopVisitScreen extends State<ShopVisitScreen> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final travelTimeViewModel = Get.find<TravelTimeViewModel>();
-      travelTimeViewModel.setWorkingScreenStatus(true);
-      debugPrint("📍 [WORKING STATUS] Shop Visit Screen - Working time ACTIVE");
-    });
 
     shopVisitViewModel.selectedShop.value = "";
     shopVisitViewModel.selectedBrand.value = "";
@@ -2690,13 +2684,6 @@ class _StateShopVisitScreen extends State<ShopVisitScreen> {
     shopVisitViewModel.updateButtonReadiness();
   }
 
-  @override
-  void dispose() {
-    final travelTimeViewModel = Get.find<TravelTimeViewModel>();
-    travelTimeViewModel.setWorkingScreenStatus(false);
-    debugPrint("📍 [WORKING STATUS] Shop Visit Screen - Working time INACTIVE");
-    super.dispose();
-  }
 
   String? requiredDropdownValidator(String? value, String placeholder) {
     if (value == null || value.isEmpty || value == placeholder) {

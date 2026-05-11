@@ -1,4 +1,5 @@
 
+
 import 'dart:async';
 import 'dart:io';
 import 'package:http/http.dart' as http;
@@ -13,6 +14,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../Models/attendance_Model.dart';
 import '../Repositories/attendance_repository.dart';
 import '../Services/FirebaseServices/firebase_remote_config.dart';
+import '../Tracker/location_tracking_service.dart';
 
 class AttendanceViewModel extends GetxController {
   var allAttendance = <AttendanceModel>[].obs;
@@ -87,23 +89,14 @@ class AttendanceViewModel extends GetxController {
 
     // 1. Check if already clocked in
     if (isClockedIn.value) {
-      Get.snackbar(
-        'Already Clocked In',
-        'You are already clocked in',
-        snackPosition: SnackPosition.TOP,
-        backgroundColor: Colors.green,
-      );
+      debugPrint('⚠️ [ATTENDANCE] Already clocked in - skipping');
       return;
     }
 
     // 2. QUICK location service check ONLY
     bool locationAvailable = await isLocationAvailable();
     if (!locationAvailable) {
-      Get.snackbar(
-        'Location Required',
-        'Please turn on device location',
-        backgroundColor: Colors.red,
-      );
+      debugPrint('⚠️ [ATTENDANCE] Location not available - skipping');
       return;
     }
 
@@ -132,11 +125,7 @@ class AttendanceViewModel extends GetxController {
     _startTimer();
 
     // 5. SHOW SUCCESS IMMEDIATELY
-    Get.snackbar(
-      'Clock-In Successful',
-      'You are now clocked in',
-      backgroundColor: Colors.green,
-    );
+    debugPrint('✅ [ATTENDANCE] Clock-in success snack handled by TimerCard');
 
     debugPrint("✅ [ATTENDANCE] CLOCK-IN COMPLETED WITH ID: $attendanceId");
 
@@ -273,6 +262,68 @@ class AttendanceViewModel extends GetxController {
   }
 
   /// 🛰 ALL BACKGROUND TASKS - WITH BLOCKING SYNC
+  // Future<void> _handleAllBackgroundTasks(String attendanceId) async {
+  //   debugPrint("🛰 [ATTENDANCE] Starting background tasks...");
+  //
+  //   try {
+  //     // A. Save to SharedPreferences
+  //     SharedPreferences prefs = await SharedPreferences.getInstance();
+  //     await prefs.setString('clockInTime', _clockInTime!.toIso8601String());
+  //     debugPrint("✅ [ATTENDANCE] Background: Saved to SharedPreferences");
+  //
+  //     // B. Already have attendanceId from parameter
+  //     await prefs.remove('totalDistance');
+  //     await prefs.setInt('secondsPassed', 0);
+  //     debugPrint("✅ [ATTENDANCE] Background: Using attendance ID: $attendanceId");
+  //
+  //     // C. ✅ FIX: Get REAL GPS coordinates (not 0,0)
+  //     Map<String, double> gps = await _getValidGPS();
+  //     double realLat = gps['lat']!;
+  //     double realLng = gps['lng']!;
+  //     debugPrint("📍 [ATTENDANCE] Using GPS: lat=$realLat, lng=$realLng");
+  //
+  //     // ✅ FIX: Capture exact clock-in date and time
+  //     final DateTime clockInNow = _clockInTime ?? DateTime.now();
+  //
+  //     // ✅ FIX: Save to local database WITH lat, lng, date, time
+  //     addAttendance(
+  //       AttendanceModel(
+  //         attendance_in_id: attendanceId,
+  //         user_id: user_id,
+  //         city: userCity,
+  //         booker_name: userName,
+  //         lat_in: realLat,                          // ✅ Real GPS lat
+  //         lng_in: realLng,                          // ✅ Real GPS lng
+  //         designation: userDesignation,
+  //         address: locationViewModel.shopAddress.value,
+  //         attendance_in_date: clockInNow,           // ✅ Actual clock-in date
+  //         attendance_in_time: clockInNow,           // ✅ Actual clock-in time
+  //       ),
+  //     );
+  //     debugPrint("✅ [ATTENDANCE] Saved: lat=$realLat, lng=$realLng, time=$clockInNow");
+  //
+  //     // D. ✅ BLOCKING SERVER SYNC
+  //     debugPrint("🌐 [ATTENDANCE] Starting server sync...");
+  //
+  //     final internetStatus = await _checkInternetSpeed().timeout(
+  //       Duration(seconds: 3),
+  //       onTimeout: () => 'none',
+  //     );
+  //
+  //     if (internetStatus == 'fast') {
+  //       debugPrint("🌐 [ATTENDANCE] Calling postDataFromDatabaseToAPI");
+  //       await attendanceRepository.postDataFromDatabaseToAPI();
+  //       debugPrint("✅ [ATTENDANCE] Server sync completed");
+  //     } else {
+  //       debugPrint("🌐 [ATTENDANCE] No internet - will sync later");
+  //     }
+  //
+  //   } catch (e) {
+  //     debugPrint("⚠ [ATTENDANCE] Background tasks error: $e");
+  //   }
+  // }
+
+  /// 🛰 ALL BACKGROUND TASKS - WITH BLOCKING SYNC
   Future<void> _handleAllBackgroundTasks(String attendanceId) async {
     debugPrint("🛰 [ATTENDANCE] Starting background tasks...");
 
@@ -313,6 +364,10 @@ class AttendanceViewModel extends GetxController {
       );
       debugPrint("✅ [ATTENDANCE] Saved: lat=$realLat, lng=$realLng, time=$clockInNow");
 
+      // ✅ START GPS TRACKING
+      await LocationTrackingService().startTracking();
+      debugPrint('✅ [ATTENDANCE] GPS tracking started on clock-in');
+
       // D. ✅ BLOCKING SERVER SYNC
       debugPrint("🌐 [ATTENDANCE] Starting server sync...");
 
@@ -333,6 +388,7 @@ class AttendanceViewModel extends GetxController {
       debugPrint("⚠ [ATTENDANCE] Background tasks error: $e");
     }
   }
+
 
   // 🌐 SERVER SYNC - IMMEDIATE (LIKE CLOCK-OUT)
   void _tryServerSync() async {

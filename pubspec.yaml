@@ -21,7 +21,8 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 #version: 1.0.0+2
 #version: 27.1.2+6
 #version: 29.1.0+8
-version: 30.0.0+2
+#version: 30.0.0+9
+version: 59.0.0+59
 
 environment:
   sdk: ^3.5.4
@@ -45,11 +46,7 @@ dependencies:
 #    git:
 #      url: https://github.com/Abdullah37249/route_map
 
-  workmanager:
-    git:
-      url: https://github.com/fluttercommunity/flutter_workmanager.git
-      path: workmanager
-      ref: main
+  workmanager: ^0.9.0+3
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
@@ -90,7 +87,7 @@ dependencies:
 #  workmanager: ^0.5.2
   flutter_local_notifications: ^18.0.1
   flutter_background_service: ^5.1.0
-  device_info_plus: ^11.2.1
+  device_info_plus: ^12.4.0
   isolate: ^2.1.1
   share_plus: ^11.0.0
   pdf: ^3.11.3
@@ -124,6 +121,18 @@ dependencies:
   lucide_icons: ^0.257.0
   new_version_plus: ^0.1.2
   synchronized: ^3.4.0
+  image_cropper: ^12.2.1
+  image: ^4.8.0
+  flutter_secure_storage: ^10.0.0
+  local_auth: ^3.0.1
+  lottie: ^3.3.3
+  battery_plus: ^7.0.0
+  firebase_crashlytics: ^4.3.10
+  timezone: ^0.10.1
+#  mock_location_detector: ^1.0.0
+#  sim_phone_plus: ^0.0.3
+#  telephony: ^0.2.0
+#  sim_card_info: ^1.0.2
 
 
 #  flutter_asset_manager: ^0.0.2

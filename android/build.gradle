@@ -1,6 +1,49 @@
+//
+//buildscript {
+//    ext.kotlin_version = '1.9.25'
+//    repositories {
+//        maven {
+//            url = uri("https://plugins.gradle.org/m2/")
+//        }
+//        mavenCentral()
+//        google()
+//    }
+//    dependencies {
+////        classpath 'com.android.tools.build:gradle:8.3.2'
+//        classpath 'com.android.tools.build:gradle:8.5.2'
+//        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+//        classpath 'com.google.gms:google-services:4.3.15'
+//    }
+//}
+//
+//
+//allprojects {
+//    repositories {
+//        google()
+//        mavenCentral()
+//        maven { url 'https://dl.bintray.com/mautini/maven' }
+//        maven {
+//            url "https://jitpack.io"
+//        }
+//    }
+//}
+//
+//rootProject.buildDir = "../build"
+//subprojects {
+//    project.buildDir = "${rootProject.buildDir}/${project.name}"
+//}
+//subprojects {
+//    project.evaluationDependsOn(":app")
+//}
+//
+//tasks.register("clean", Delete) {
+//    delete rootProject.buildDir
+//}
+
 
 buildscript {
-    ext.kotlin_version = '1.9.25'
+//    ext.kotlin_version = '2.1.0'
+    ext.kotlin_version = '2.3.10'
     repositories {
         maven {
             url = uri("https://plugins.gradle.org/m2/")
@@ -10,7 +53,7 @@ buildscript {
     }
     dependencies {
 //        classpath 'com.android.tools.build:gradle:8.3.2'
-        classpath 'com.android.tools.build:gradle:8.5.2'
+        classpath 'com.android.tools.build:gradle:8.6.0'
         classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
         classpath 'com.google.gms:google-services:4.3.15'
     }
@@ -25,6 +68,8 @@ allprojects {
         maven {
             url "https://jitpack.io"
         }
+        // ✅ Paho MQTT — required for org.eclipse.paho.client.mqttv3
+        maven { url 'https://repo.eclipse.org/content/repositories/paho-releases/' }
     }
 }
 

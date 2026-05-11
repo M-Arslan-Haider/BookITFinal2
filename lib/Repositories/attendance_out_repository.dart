@@ -14,7 +14,7 @@ import '../Services/FirebaseServices/firebase_remote_config.dart';
 class AttendanceOutRepository extends GetxService {
   DBHelper dbHelper = DBHelper();
 
-  // ✅ ADD: Track posted IDs to prevent duplicate posting
+  // Track posted IDs to prevent duplicate posting in the same session
   Set<String> _postedIds = {};
 
   Future<List<AttendanceOutModel>> getAttendanceOut() async {
@@ -29,8 +29,8 @@ class AttendanceOutRepository extends GetxService {
       'lng_out',
       'total_distance',
       'address',
-      'posted'
-          'reason'
+      'posted',
+      'reason', // ✅ FIX: Added missing comma that caused 'posted' and 'reason' to merge into one broken column name
     ]);
     List<AttendanceOutModel> attendanceout = [];
 
@@ -39,9 +39,8 @@ class AttendanceOutRepository extends GetxService {
     }
 
     debugPrint('📊 [REPO-OUT] Raw data from AttendanceOut database: ${maps.length} records');
-
     for (var map in maps) {
-      debugPrint("   - ID: ${map['attendance_out_id']}, Posted: ${map['posted']}");
+      debugPrint("   - ID: ${map['attendance_out_id']}, Posted: ${map['posted']}, Reason: ${map['reason']}");
     }
     return attendanceout;
   }
@@ -56,14 +55,12 @@ class AttendanceOutRepository extends GetxService {
 
       var dbClient = await dbHelper.db;
 
-      // Save data to database
       int savedCount = 0;
       for (var item in data) {
         try {
-          item['posted'] = 1; // Set posted to 1 since it's from server
+          item['posted'] = 1;
           AttendanceOutModel model = AttendanceOutModel.fromMap(item);
 
-          // ✅ CHECK: Don't save duplicates
           List<Map> existing = await dbClient.query(
             attendanceOutTableName,
             where: 'attendance_out_id = ?',
@@ -94,13 +91,16 @@ class AttendanceOutRepository extends GetxService {
       List<Map> maps = await dbClient.query(
         attendanceOutTableName,
         where: 'posted = ?',
-        whereArgs: [0], // Fetch records that have not been posted
+        whereArgs: [0],
       );
 
       List<AttendanceOutModel> attendanceOutModel =
       maps.map((map) => AttendanceOutModel.fromMap(map)).toList();
 
       debugPrint('📊 [REPO-OUT] Found ${attendanceOutModel.length} unposted records');
+      for (var r in attendanceOutModel) {
+        debugPrint("   - Unposted ID: ${r.attendance_out_id}, Reason: ${r.reason}");
+      }
 
       return attendanceOutModel;
     } catch (e) {
@@ -109,27 +109,27 @@ class AttendanceOutRepository extends GetxService {
     }
   }
 
-  // ✅ UPDATED: Post data with STRICT duplicate prevention
-  Future<void> postDataFromDatabaseToAPI() async {
+  /// ✅ FIX: postDataFromDatabaseToAPI now returns bool so callers know if anything was posted
+  Future<bool> postDataFromDatabaseToAPI() async {
     debugPrint('🔄 [REPO-OUT] ===== STARTING POST TO API =====');
+    bool anySuccess = false;
 
     try {
-      // Check network
       if (!await isNetworkAvailable()) {
         debugPrint('📴 [REPO-OUT] Network not available. Skipping post.');
-        return;
+        return false;
       }
 
       var unPostedRecords = await getUnPostedAttendanceOut();
 
       if (unPostedRecords.isEmpty) {
         debugPrint('📭 [REPO-OUT] No unposted records to send');
-        return;
+        return false;
       }
 
       debugPrint('📤 [REPO-OUT] Attempting to post ${unPostedRecords.length} records');
 
-      // ✅ STRICT: Create a map to track which IDs we're processing
+      // Deduplicate by ID
       Map<String, AttendanceOutModel> uniqueRecords = {};
       for (var record in unPostedRecords) {
         if (record.attendance_out_id != null) {
@@ -144,38 +144,32 @@ class AttendanceOutRepository extends GetxService {
 
       for (var record in uniqueRecords.values) {
         try {
-          // ✅ STRICT CHECK: Skip if already posted in this session
           if (_postedIds.contains(record.attendance_out_id.toString())) {
-            debugPrint('⚠️ [REPO-OUT] Skipping already posted in this session: ${record.attendance_out_id}');
+            debugPrint('⚠️ [REPO-OUT] Skipping already-posted in this session: ${record.attendance_out_id}');
             continue;
           }
 
-          // ✅ STRICT CHECK: Verify this is a valid record
           if (record.attendance_out_id == null || record.attendance_out_id.toString().isEmpty) {
             debugPrint('❌ [REPO-OUT] Invalid record ID, skipping');
             continue;
           }
 
-          debugPrint('📤 [REPO-OUT] Posting: ${record.attendance_out_id}');
+          debugPrint('📤 [REPO-OUT] Posting: ${record.attendance_out_id}, reason: ${record.reason}');
 
           bool posted = await _postSingleRecord(record);
 
           if (posted) {
             successCount++;
-            // Mark as posted in local database
+            anySuccess = true;
             record.posted = 1;
             await update(record);
-
-            // Add to posted IDs to prevent duplicate posting in same session
             _postedIds.add(record.attendance_out_id.toString());
-
             debugPrint('✅ [REPO-OUT] Successfully posted: ${record.attendance_out_id}');
           } else {
             failCount++;
             debugPrint('❌ [REPO-OUT] Failed to post: ${record.attendance_out_id}');
           }
 
-          // Small delay to avoid overwhelming server
           await Future.delayed(const Duration(milliseconds: 100));
 
         } catch (e) {
@@ -185,8 +179,6 @@ class AttendanceOutRepository extends GetxService {
       }
 
       debugPrint('📊 [REPO-OUT] Posting results: $successCount success, $failCount failed');
-
-      // ✅ Clean up any duplicate records after posting
       await _cleanDuplicateRecords();
 
     } catch (e) {
@@ -194,11 +186,11 @@ class AttendanceOutRepository extends GetxService {
     }
 
     debugPrint('🔄 [REPO-OUT] ===== POST COMPLETED =====');
+    return anySuccess;
   }
 
-  // ✅ UPDATED: Post single record with retry logic
   Future<bool> _postSingleRecord(AttendanceOutModel record) async {
-    int maxRetries = 2; // Reduced retries to prevent duplicate attempts
+    int maxRetries = 2;
 
     for (int attempt = 1; attempt <= maxRetries; attempt++) {
       try {
@@ -208,7 +200,10 @@ class AttendanceOutRepository extends GetxService {
         debugPrint('🌐 [REPO-OUT] Attempt $attempt: Posting to $apiUrl');
 
         var recordData = record.toMap();
-        recordData['reason'] = record.reason ?? 'manual';
+        // ✅ FIX: Always include reason — this was missing, causing server to reject or mis-record
+        recordData['reason'] = record.reason?.isNotEmpty == true ? record.reason : 'manual';
+
+        debugPrint('📦 [REPO-OUT] Payload reason: ${recordData['reason']}, time: ${recordData['attendance_out_time']}');
 
         final response = await http.post(
           Uri.parse(apiUrl),
@@ -225,31 +220,26 @@ class AttendanceOutRepository extends GetxService {
           debugPrint('✅ [REPO-OUT] Posted successfully: ${record.attendance_out_id}');
           return true;
         } else if (response.statusCode == 409) {
-          // 409 Conflict - record already exists on server
-          debugPrint('⚠️ [REPO-OUT] Record already exists on server: ${record.attendance_out_id}');
-          return true; // Treat as success since record exists
+          // 409 Conflict — record already exists on server, treat as success
+          debugPrint('⚠️ [REPO-OUT] Record already exists on server (409): ${record.attendance_out_id}');
+          return true;
         } else {
-          debugPrint('❌ [REPO-OUT] Server error ${response.statusCode}');
-
+          debugPrint('❌ [REPO-OUT] Server error ${response.statusCode}: ${response.body}');
           if (attempt < maxRetries) {
-            debugPrint('🔄 [REPO-OUT] Retrying in 1 second...');
             await Future.delayed(const Duration(seconds: 1));
           }
         }
       } catch (e) {
         debugPrint('❌ [REPO-OUT] Attempt $attempt failed: $e');
-
         if (attempt < maxRetries) {
-          debugPrint('🔄 [REPO-OUT] Retrying in 1 second...');
           await Future.delayed(const Duration(seconds: 1));
         }
       }
     }
 
-    return false; // All retries failed
+    return false;
   }
 
-  // ✅ ADD: Check if record already exists before adding
   Future<bool> checkIfExists(String attendanceId) async {
     try {
       var dbClient = await dbHelper.db;
@@ -266,27 +256,26 @@ class AttendanceOutRepository extends GetxService {
     }
   }
 
-  // ✅ UPDATED: Add with strict duplicate check
+  /// ✅ FIX: add() now returns the row ID (>0 = inserted, 0 = duplicate skipped, -1 = error)
+  /// Callers can check the return value to know if a DB insert actually happened.
   Future<int> add(AttendanceOutModel attendanceoutModel) async {
     try {
       var dbClient = await dbHelper.db;
 
-      // ✅ STRICT CHECK: Check for duplicate before inserting
       bool exists = await checkIfExists(attendanceoutModel.attendance_out_id.toString());
-
       if (exists) {
         debugPrint('⚠️ [REPO-OUT] Duplicate record found, skipping: ${attendanceoutModel.attendance_out_id}');
-        return 0; // Return 0 to indicate no insertion happened
+        return 0;
       }
 
-      debugPrint('✅ [REPO-OUT] Adding new record: ${attendanceoutModel.attendance_out_id}');
+      debugPrint('✅ [REPO-OUT] Adding new record: ${attendanceoutModel.attendance_out_id}, reason: ${attendanceoutModel.reason}');
       return await dbClient.insert(
           attendanceOutTableName,
           attendanceoutModel.toMap()
       );
     } catch (e) {
       debugPrint('❌ [REPO-OUT] Error adding record: $e');
-      return -1; // Return -1 to indicate error
+      return -1;
     }
   }
 
@@ -345,12 +334,10 @@ class AttendanceOutRepository extends GetxService {
     }
   }
 
-  // ✅ FIXED: Clean duplicate records without id/createdAt
   Future<void> _cleanDuplicateRecords() async {
     try {
       var dbClient = await dbHelper.db;
 
-      // Get all attendance_out_ids
       List<Map> allRecords = await dbClient.query(
         attendanceOutTableName,
         columns: ['attendance_out_id'],
@@ -359,7 +346,6 @@ class AttendanceOutRepository extends GetxService {
       Set<String> uniqueIds = {};
       List<String> duplicateIds = [];
 
-      // Find duplicate IDs
       for (var record in allRecords) {
         String id = record['attendance_out_id'].toString();
         if (uniqueIds.contains(id)) {
@@ -369,11 +355,9 @@ class AttendanceOutRepository extends GetxService {
         }
       }
 
-      // Remove duplicates
       for (String duplicateId in duplicateIds) {
         debugPrint('⚠️ [REPO-OUT] Found duplicates for ID: $duplicateId');
 
-        // Get all records with this ID
         List<Map> duplicates = await dbClient.query(
           attendanceOutTableName,
           where: 'attendance_out_id = ?',
@@ -381,11 +365,10 @@ class AttendanceOutRepository extends GetxService {
         );
 
         if (duplicates.length > 1) {
-          // Keep the first one, delete the rest
           for (int i = 1; i < duplicates.length; i++) {
             await dbClient.delete(
               attendanceOutTableName,
-              where: 'rowid = ?', // Use SQLite's rowid
+              where: 'rowid = ?',
               whereArgs: [duplicates[i]['rowid']],
             );
           }
@@ -398,7 +381,6 @@ class AttendanceOutRepository extends GetxService {
     }
   }
 
-  // ✅ ADDED: Get record by ID
   Future<AttendanceOutModel?> getRecordById(String attendanceId) async {
     try {
       var dbClient = await dbHelper.db;
@@ -418,13 +400,11 @@ class AttendanceOutRepository extends GetxService {
     }
   }
 
-  // ✅ ADDED: Clear posted IDs cache
   void clearPostedCache() {
     _postedIds.clear();
     debugPrint('🧹 [REPO-OUT] Cleared posted IDs cache');
   }
 
-  // ✅ ADDED: Force mark record as posted (for manual fixes)
   Future<void> markAsPosted(String attendanceId) async {
     try {
       var record = await getRecordById(attendanceId);
@@ -438,4 +418,3 @@ class AttendanceOutRepository extends GetxService {
     }
   }
 }
-

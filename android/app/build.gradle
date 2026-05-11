@@ -1,4 +1,109 @@
-
+//
+//
+//plugins {
+//    id("com.android.application")
+//    id("com.google.gms.google-services")
+//    id "kotlin-android"
+//    id "dev.flutter.flutter-gradle-plugin"
+//}
+//
+//def keystoreProperties = new Properties()
+//def keystorePropertiesFile = rootProject.file("keystore.properties")
+//if (keystorePropertiesFile.exists()) {
+//    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+//}
+//
+//android {
+//    namespace = "com.metaxperts.order_booking_app"
+//    ndkVersion = "29.0.14206865"
+//    compileSdkVersion 36
+//
+//    compileOptions {
+//        sourceCompatibility = JavaVersion.VERSION_17
+//        targetCompatibility = JavaVersion.VERSION_17
+//        coreLibraryDesugaringEnabled true
+//    }
+//
+//    kotlinOptions {
+//        jvmTarget = JavaVersion.VERSION_17
+//    }
+//
+//    packagingOptions {
+//        exclude 'META-INF/*'
+//    }
+//
+//    defaultConfig {
+//        applicationId "com.metaxperts.order_booking_app"
+//        minSdkVersion flutter.minSdkVersion
+//        targetSdkVersion 36
+//        versionCode = 57
+//        versionName = "57.0.0"
+//    }
+//
+//    signingConfigs {
+//        release {
+//            if (keystorePropertiesFile.exists()) {
+//                keyAlias keystoreProperties['keyAlias']
+//                keyPassword keystoreProperties['keyPassword']
+//                storeFile file(keystoreProperties['storeFile'])
+//                storePassword keystoreProperties['storePassword']
+//            }
+//        }
+//    }
+//
+//    buildTypes {
+//        release {
+//            signingConfig signingConfigs.release
+//            minifyEnabled true
+//            shrinkResources true
+//            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'),
+//                    'proguard-rules.pro'
+//        }
+//    }
+//}
+//
+//flutter {
+//    source = "../.."
+//}
+//
+//dependencies {
+//    implementation(platform("com.google.firebase:firebase-bom:33.16.0"))
+//    implementation "com.google.firebase:firebase-analytics"
+//
+//    implementation 'org.eclipse.paho:org.eclipse.paho.client.mqttv3:1.2.5'
+//
+//    implementation 'com.google.android.play:integrity:1.4.0'
+//    implementation 'com.google.android.gms:play-services-base:18.3.0'
+//    implementation 'com.google.firebase:firebase-functions:20.4.0'
+//    implementation 'com.google.android.gms:play-services-auth:21.0.0'
+//    implementation 'com.google.android.gms:play-services-maps:18.2.0'
+//    implementation 'com.google.android.gms:play-services-location:21.2.0'
+//    implementation 'androidx.core:core-ktx:1.13.1'
+//    implementation 'androidx.appcompat:appcompat:1.6.1'
+//    implementation 'com.google.android.material:material:1.11.0'
+//    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+//
+//    testImplementation 'junit:junit:4.13.2'
+//    androidTestImplementation 'androidx.test.ext:junit:1.1.5'
+//    androidTestImplementation 'androidx.test.espresso:espresso-core:3.5.1'
+//
+//    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.0.4'
+//
+//    configurations.all {
+//        exclude group: 'org.bouncycastle', module: 'bcprov-jdk18on'
+//    }
+//
+//    configurations.all {
+//        resolutionStrategy {
+//            force 'androidx.core:core:1.13.1'
+//            force 'androidx.core:core-ktx:1.13.1'
+//            force 'androidx.activity:activity:1.9.2'
+//            force 'androidx.activity:activity-ktx:1.9.2'
+//            force 'androidx.activity:activity-compose:1.9.2'
+//            force 'androidx.browser:browser:1.8.0'
+//        }
+//    }
+//}
 
 plugins {
     id("com.android.application")
@@ -8,14 +113,13 @@ plugins {
 }
 
 def keystoreProperties = new Properties()
-def keystorePropertiesFile = rootProject.file("keystore.properties")  // Fixed: changed from "key.properties"
+def keystorePropertiesFile = rootProject.file("keystore.properties")
 if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
 }
 
 android {
     namespace = "com.metaxperts.order_booking_app"
-//    ndkVersion = "25.1.8937393"
     ndkVersion = "29.0.14206865"
     compileSdkVersion 36
 
@@ -29,28 +133,32 @@ android {
         jvmTarget = JavaVersion.VERSION_17
     }
 
+    // Paho MQTT ships duplicate META-INF entries.
+    // Using 'exclude META-INF/*' is too broad — it strips signing info and breaks release.
+    // Instead, target only the specific conflicting files:
     packagingOptions {
-        exclude 'META-INF/*'
+        pickFirst 'META-INF/INDEX.LIST'
+        pickFirst 'META-INF/io.netty.versions.properties'
+        exclude  'META-INF/ECLIPSE_.SF'
+        exclude  'META-INF/ECLIPSE_.RSA'
+        exclude  'META-INF/maven/org.eclipse.paho/org.eclipse.paho.client.mqttv3/pom.xml'
+        exclude  'META-INF/maven/org.eclipse.paho/org.eclipse.paho.client.mqttv3/pom.properties'
     }
 
     defaultConfig {
         applicationId "com.metaxperts.order_booking_app"
         minSdkVersion flutter.minSdkVersion
-        targetSdkVersion 35
-        //for updated
-        versionCode = 43
-        versionName = "43.0.0"
-//        versionCode = 30
-//        versionName = "30.0.0"
+        targetSdkVersion 36
+        versionCode = 59
+        versionName = "59.0.0"
     }
-
 
     signingConfigs {
         release {
             if (keystorePropertiesFile.exists()) {
-                keyAlias keystoreProperties['keyAlias']
-                keyPassword keystoreProperties['keyPassword']
-                storeFile file(keystoreProperties['storeFile'])  // Simplified: removed ternary operator
+                keyAlias     keystoreProperties['keyAlias']
+                keyPassword  keystoreProperties['keyPassword']
+                storeFile    file(keystoreProperties['storeFile'])
                 storePassword keystoreProperties['storePassword']
             }
         }
@@ -64,6 +172,10 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'),
                     'proguard-rules.pro'
         }
+        debug {
+            minifyEnabled false
+            shrinkResources false
+        }
     }
 }
 
@@ -74,13 +186,21 @@ flutter {
 dependencies {
     implementation(platform("com.google.firebase:firebase-bom:33.16.0"))
     implementation "com.google.firebase:firebase-analytics"
+
+
+    implementation "androidx.work:work-runtime:2.9.1"
+    implementation 'androidx.multidex:multidex:2.0.1'
+
+    // Eclipse Paho MQTT client
+    implementation 'org.eclipse.paho:org.eclipse.paho.client.mqttv3:1.2.5'
+
     implementation 'com.google.android.play:integrity:1.4.0'
     implementation 'com.google.android.gms:play-services-base:18.3.0'
     implementation 'com.google.firebase:firebase-functions:20.4.0'
     implementation 'com.google.android.gms:play-services-auth:21.0.0'
     implementation 'com.google.android.gms:play-services-maps:18.2.0'
     implementation 'com.google.android.gms:play-services-location:21.2.0'
-    implementation 'androidx.core:core-ktx:1.12.0'
+    implementation 'androidx.core:core-ktx:1.13.1'
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'com.google.android.material:material:1.11.0'
     implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
@@ -92,6 +212,7 @@ dependencies {
     coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.0.4'
 
     configurations.all {
+        // BouncyCastle version conflict with Paho — exclude the old variant
         exclude group: 'org.bouncycastle', module: 'bcprov-jdk18on'
     }
 
