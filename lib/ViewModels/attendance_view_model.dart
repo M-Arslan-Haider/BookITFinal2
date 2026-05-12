@@ -2,6 +2,7 @@
 
 import 'dart:async';
 import 'dart:io';
+import 'package:battery_plus/battery_plus.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -261,7 +262,8 @@ class AttendanceViewModel extends GetxController {
     };
   }
 
-  /// 🛰 ALL BACKGROUND TASKS - WITH BLOCKING SYNC
+
+  // /// 🛰 ALL BACKGROUND TASKS - WITH BLOCKING SYNC
   // Future<void> _handleAllBackgroundTasks(String attendanceId) async {
   //   debugPrint("🛰 [ATTENDANCE] Starting background tasks...");
   //
@@ -302,6 +304,10 @@ class AttendanceViewModel extends GetxController {
   //     );
   //     debugPrint("✅ [ATTENDANCE] Saved: lat=$realLat, lng=$realLng, time=$clockInNow");
   //
+  //     // ✅ START GPS TRACKING
+  //     await LocationTrackingService().startTracking();
+  //     debugPrint('✅ [ATTENDANCE] GPS tracking started on clock-in');
+  //
   //     // D. ✅ BLOCKING SERVER SYNC
   //     debugPrint("🌐 [ATTENDANCE] Starting server sync...");
   //
@@ -338,37 +344,42 @@ class AttendanceViewModel extends GetxController {
       await prefs.setInt('secondsPassed', 0);
       debugPrint("✅ [ATTENDANCE] Background: Using attendance ID: $attendanceId");
 
-      // C. ✅ FIX: Get REAL GPS coordinates (not 0,0)
+      // C. Get REAL GPS coordinates
       Map<String, double> gps = await _getValidGPS();
       double realLat = gps['lat']!;
       double realLng = gps['lng']!;
       debugPrint("📍 [ATTENDANCE] Using GPS: lat=$realLat, lng=$realLng");
 
-      // ✅ FIX: Capture exact clock-in date and time
+      // ✅ GET BATTERY LEVEL
+      int batteryLevel = await _getBatteryLevel();
+      debugPrint("🔋 [ATTENDANCE] Battery level: $batteryLevel%");
+
+      // Capture exact clock-in date and time
       final DateTime clockInNow = _clockInTime ?? DateTime.now();
 
-      // ✅ FIX: Save to local database WITH lat, lng, date, time
+      // Save to local database WITH lat, lng, date, time, and battery
       addAttendance(
         AttendanceModel(
           attendance_in_id: attendanceId,
           user_id: user_id,
           city: userCity,
           booker_name: userName,
-          lat_in: realLat,                          // ✅ Real GPS lat
-          lng_in: realLng,                          // ✅ Real GPS lng
+          lat_in: realLat,
+          lng_in: realLng,
           designation: userDesignation,
           address: locationViewModel.shopAddress.value,
-          attendance_in_date: clockInNow,           // ✅ Actual clock-in date
-          attendance_in_time: clockInNow,           // ✅ Actual clock-in time
+          attendance_in_date: clockInNow,
+          attendance_in_time: clockInNow,
+          battery: batteryLevel,  // ✅ ADD BATTERY HERE
         ),
       );
-      debugPrint("✅ [ATTENDANCE] Saved: lat=$realLat, lng=$realLng, time=$clockInNow");
+      debugPrint("✅ [ATTENDANCE] Saved: lat=$realLat, lng=$realLng, time=$clockInNow, battery=$batteryLevel%");
 
-      // ✅ START GPS TRACKING
+      // START GPS TRACKING
       await LocationTrackingService().startTracking();
       debugPrint('✅ [ATTENDANCE] GPS tracking started on clock-in');
 
-      // D. ✅ BLOCKING SERVER SYNC
+      // Server sync
       debugPrint("🌐 [ATTENDANCE] Starting server sync...");
 
       final internetStatus = await _checkInternetSpeed().timeout(
@@ -686,6 +697,19 @@ class AttendanceViewModel extends GetxController {
 
     } catch (e) {
       debugPrint("❌ [ATTENDANCE] Error in force cleanup: $e");
+    }
+  }
+
+  // Add this method to AttendanceViewModel class
+  Future<int> _getBatteryLevel() async {
+    try {
+      final battery = Battery();
+      final batteryLevel = await battery.batteryLevel;
+      debugPrint('🔋 [BATTERY] Current battery level: $batteryLevel%');
+      return batteryLevel;
+    } catch (e) {
+      debugPrint('⚠️ [BATTERY] Could not get battery level: $e');
+      return 0; // Default value if can't get battery
     }
   }
 }

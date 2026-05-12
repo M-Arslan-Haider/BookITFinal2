@@ -1588,7 +1588,6 @@ import 'Screens/NSM/nsm_homepage.dart';
 import 'Screens/RSMS_Views/RSM_HomePage.dart';
 import 'Screens/SM/sm_homepage.dart';
 import 'Screens/shop_visit_screen.dart';
-import 'Services/ApiServices/Location_log_service.dart';
 import 'Services/FirebaseServices/firebase_remote_config.dart';
 import 'Services/FirebaseServices/firebase_options.dart';
 import 'package:flutter_background_service_android/flutter_background_service_android.dart'
@@ -1928,12 +1927,12 @@ Future<void> _initializeBackgroundServices() async {
     }
   }
 
-  try {
-    await LocationLogService.instance.resumeIfNeeded();
-    debugPrint("✅ [LAZY] Location Log Service resumed");
-  } catch (e) {
-    debugPrint("❌ [LAZY] Location Log Service error: $e");
-  }
+  // try {
+  //   await LocationLogService.instance.resumeIfNeeded();
+  //   debugPrint("✅ [LAZY] Location Log Service resumed");
+  // } catch (e) {
+  //   debugPrint("❌ [LAZY] Location Log Service error: $e");
+  // }
 }
 
 // ✅ NEW: MyApp with WidgetsBindingObserver for bubble

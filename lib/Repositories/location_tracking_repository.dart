@@ -195,9 +195,9 @@ import '../Databases/dp_helper.dart';
 class LocationTrackingRepository {
   final DBHelper _dbHelper = DBHelper();
 
-  static const String _apiUrl = 'http://103.149.33.102:8001/location/bulk';
+  // static const String _apiUrl = 'http://103.149.33.102:8001/location/bulk';
 
-  // static const String _apiUrl = 'http://119.153.102.7:8001/location/bulk';
+  static const String _apiUrl = 'http://119.153.102.7:8001/location/bulk';
 
   bool _isSyncing = false;
   bool _cachedOnline = false;

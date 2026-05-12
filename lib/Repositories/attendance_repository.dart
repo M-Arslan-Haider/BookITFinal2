@@ -26,7 +26,8 @@ class AttendanceRepository {
       'designation',
       'city',
       'address',
-      'posted'
+      'posted',
+      'battery',  // ✅ ADD THIS
     ]);
     List<AttendanceModel> attendance = [];
     for (int i = 0; i < maps.length; i++) {
