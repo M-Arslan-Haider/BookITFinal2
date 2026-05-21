@@ -1,3 +1,4 @@
+
 package com.metaxperts.order_booking_app
 
 import android.content.BroadcastReceiver
@@ -46,15 +47,12 @@ class ServiceRestartReceiver : BroadcastReceiver() {
                 context.startService(serviceIntent)
             }
 
-            // ✅ NEW: Ensure backup systems are running after restart
-            BulkPostingScheduler.startBulkPostingAlarm(context)
-            try {
-                WorkManagerBulkPoster.schedule(context)
-            } catch (e: Exception) {
-                Log.w(TAG, "WorkManager not available: ${e.message}")
-            }
+            // ✅ FIX: BulkPostingScheduler aur WorkManager yahan se START NAHI karo.
+            // LocationMonitorService ka onStartCommand() khud inhe start karta hai.
+            // Dono jagah se start karne par double posting hoti thi jab app kill hoti thi.
+            // Service restart hogi to onStartCommand() mein backup systems khud shuru honge.
 
-            Log.d(TAG, "✅ Service and backup systems restarted successfully")
+            Log.d(TAG, "✅ Service restart triggered — backup systems will be started by onStartCommand()")
         } catch (e: Exception) {
             Log.e(TAG, "❌ Failed to restart service: ${e.message}")
         }

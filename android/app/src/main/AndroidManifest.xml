@@ -1,412 +1,4 @@
 
-
-
-<!--&lt;!&ndash;<manifest xmlns:android="http://schemas.android.com/apk/res/android"&ndash;&gt;-->
-<!--&lt;!&ndash;    xmlns:tools="http://schemas.android.com/tools">&ndash;&gt;-->
-
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.INTERNET" />&ndash;&gt;-->
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />&ndash;&gt;-->
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />&ndash;&gt;-->
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>&ndash;&gt;-->
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />&ndash;&gt;-->
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />&ndash;&gt;-->
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />&ndash;&gt;-->
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />&ndash;&gt;-->
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />&ndash;&gt;-->
-
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"&ndash;&gt;-->
-<!--&lt;!&ndash;        android:maxSdkVersion="32" />&ndash;&gt;-->
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"&ndash;&gt;-->
-<!--&lt;!&ndash;        android:maxSdkVersion="29" />&ndash;&gt;-->
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"&ndash;&gt;-->
-<!--&lt;!&ndash;        tools:ignore="ScopedStorage" />&ndash;&gt;-->
-
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />&ndash;&gt;-->
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />&ndash;&gt;-->
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />&ndash;&gt;-->
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.CAMERA" />&ndash;&gt;-->
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />&ndash;&gt;-->
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.RECORD_AUDIO" />&ndash;&gt;-->
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.READ_PHONE_STATE" />&ndash;&gt;-->
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.READ_CONTACTS" />&ndash;&gt;-->
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />&ndash;&gt;-->
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />&ndash;&gt;-->
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.WAKE_LOCK" />&ndash;&gt;-->
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.USE_BIOMETRIC"/>&ndash;&gt;-->
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.USE_FINGERPRINT"/>&ndash;&gt;-->
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />&ndash;&gt;-->
-<!--&lt;!&ndash;    &lt;!&ndash; ✅ NAYA: Android 13+ pe exact alarm ke liye — user approval nahi maangta &ndash;&gt;&ndash;&gt;-->
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />&ndash;&gt;-->
-
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />&ndash;&gt;-->
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.VIBRATE" />&ndash;&gt;-->
-
-<!--&lt;!&ndash;    &lt;!&ndash; ✅ NAYA ADD: Screen popup (Full Screen Intent) ke liye &ndash;&gt;&ndash;&gt;-->
-<!--&lt;!&ndash;    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />&ndash;&gt;-->
-
-<!--&lt;!&ndash;    <application&ndash;&gt;-->
-<!--&lt;!&ndash;        android:label="BookIT"&ndash;&gt;-->
-<!--&lt;!&ndash;        android:name="${applicationName}"&ndash;&gt;-->
-<!--&lt;!&ndash;        android:icon="@mipmap/ic_launcher"&ndash;&gt;-->
-<!--&lt;!&ndash;        android:enableOnBackInvokedCallback="true"&ndash;&gt;-->
-<!--&lt;!&ndash;        android:networkSecurityConfig="@xml/network_security_config">&ndash;&gt;-->
-
-<!--&lt;!&ndash;        <provider&ndash;&gt;-->
-<!--&lt;!&ndash;            android:name="androidx.core.content.FileProvider"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:authorities="${applicationId}.fileprovider"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:exported="false"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:grantUriPermissions="true">&ndash;&gt;-->
-<!--&lt;!&ndash;            <meta-data&ndash;&gt;-->
-<!--&lt;!&ndash;                android:name="android.support.FILE_PROVIDER_PATHS"&ndash;&gt;-->
-<!--&lt;!&ndash;                android:resource="@xml/file_paths" />&ndash;&gt;-->
-<!--&lt;!&ndash;        </provider>&ndash;&gt;-->
-
-<!--&lt;!&ndash;        <service&ndash;&gt;-->
-<!--&lt;!&ndash;            android:name=".LocationMonitorService"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:enabled="true"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:exported="false"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:foregroundServiceType="location"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:stopWithTask="false" />&ndash;&gt;-->
-
-<!--&lt;!&ndash;        <receiver&ndash;&gt;-->
-<!--&lt;!&ndash;            android:name=".BootCompletedReceiver"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:enabled="true"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:exported="true">&ndash;&gt;-->
-<!--&lt;!&ndash;            <intent-filter>&ndash;&gt;-->
-<!--&lt;!&ndash;                <action android:name="android.intent.action.BOOT_COMPLETED" />&ndash;&gt;-->
-<!--&lt;!&ndash;                &lt;!&ndash; ✅ FIX: Xiaomi/HTC quick-boot — normal boot se alag event fire karte hain &ndash;&gt;&ndash;&gt;-->
-<!--&lt;!&ndash;                <action android:name="android.intent.action.QUICKBOOT_POWERON" />&ndash;&gt;-->
-<!--&lt;!&ndash;                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />&ndash;&gt;-->
-<!--&lt;!&ndash;                &lt;!&ndash; App update ke baad bhi service restart karo &ndash;&gt;&ndash;&gt;-->
-<!--&lt;!&ndash;                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />&ndash;&gt;-->
-<!--&lt;!&ndash;            </intent-filter>&ndash;&gt;-->
-<!--&lt;!&ndash;        </receiver>&ndash;&gt;-->
-
-<!--&lt;!&ndash;        <meta-data&ndash;&gt;-->
-<!--&lt;!&ndash;            android:name="com.google.android.geo.API_KEY"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:value="AIzaSyB75e8drxN6oXb4U2V2c56yccRrEjmDmHo" />&ndash;&gt;-->
-
-<!--&lt;!&ndash;        <meta-data&ndash;&gt;-->
-<!--&lt;!&ndash;            android:name="com.google.android.gms.version"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:value="@integer/google_play_services_version" />&ndash;&gt;-->
-
-<!--&lt;!&ndash;        <activity&ndash;&gt;-->
-<!--&lt;!&ndash;            android:name=".MainActivity"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:exported="true"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:launchMode="singleTop"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:taskAffinity=""&ndash;&gt;-->
-<!--&lt;!&ndash;            android:theme="@style/LaunchTheme"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:hardwareAccelerated="true"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:windowSoftInputMode="adjustResize"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:showWhenLocked="true"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:turnScreenOn="true">&ndash;&gt;-->
-<!--&lt;!&ndash;            <meta-data&ndash;&gt;-->
-<!--&lt;!&ndash;                android:name="io.flutter.embedding.android.NormalTheme"&ndash;&gt;-->
-<!--&lt;!&ndash;                android:resource="@style/NormalTheme" />&ndash;&gt;-->
-<!--&lt;!&ndash;            <intent-filter>&ndash;&gt;-->
-<!--&lt;!&ndash;                <action android:name="android.intent.action.MAIN" />&ndash;&gt;-->
-<!--&lt;!&ndash;                <category android:name="android.intent.category.LAUNCHER" />&ndash;&gt;-->
-<!--&lt;!&ndash;            </intent-filter>&ndash;&gt;-->
-<!--&lt;!&ndash;        </activity>&ndash;&gt;-->
-
-<!--&lt;!&ndash;        <service&ndash;&gt;-->
-<!--&lt;!&ndash;            android:name="id.flutter.flutter_background_service.BackgroundService"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:foregroundServiceType="location" />&ndash;&gt;-->
-
-<!--&lt;!&ndash;        <meta-data&ndash;&gt;-->
-<!--&lt;!&ndash;            android:name="flutterEmbedding"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:value="2" />&ndash;&gt;-->
-
-<!--&lt;!&ndash;        <service&ndash;&gt;-->
-<!--&lt;!&ndash;            android:name="androidx.work.impl.background.SystemJobService"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:permission="android.permission.BIND_JOB_SERVICE"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:exported="true"&ndash;&gt;-->
-<!--&lt;!&ndash;            tools:node="merge" />&ndash;&gt;-->
-
-<!--&lt;!&ndash;        <receiver&ndash;&gt;-->
-<!--&lt;!&ndash;            android:name="androidx.work.impl.background.systemalarm.SystemAlarmScheduler"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:exported="false"&ndash;&gt;-->
-<!--&lt;!&ndash;            tools:node="merge" />&ndash;&gt;-->
-
-<!--&lt;!&ndash;        <receiver&ndash;&gt;-->
-<!--&lt;!&ndash;            android:name="androidx.work.impl.background.systemalarm.RescheduleReceiver"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:exported="false"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:directBootAware="false"&ndash;&gt;-->
-<!--&lt;!&ndash;            tools:node="merge">&ndash;&gt;-->
-<!--&lt;!&ndash;            <intent-filter>&ndash;&gt;-->
-<!--&lt;!&ndash;                <action android:name="android.intent.action.BOOT_COMPLETED" />&ndash;&gt;-->
-<!--&lt;!&ndash;                <action android:name="android.intent.action.TIME_SET" />&ndash;&gt;-->
-<!--&lt;!&ndash;                <action android:name="android.intent.action.TIMEZONE_CHANGED" />&ndash;&gt;-->
-<!--&lt;!&ndash;            </intent-filter>&ndash;&gt;-->
-<!--&lt;!&ndash;        </receiver>&ndash;&gt;-->
-
-<!--&lt;!&ndash;        &lt;!&ndash; ✅ NAYA ADD: SyncAlarmReceiver — app kill par bhi 15-min alarm &ndash;&gt;&ndash;&gt;-->
-<!--&lt;!&ndash;        <receiver&ndash;&gt;-->
-<!--&lt;!&ndash;            android:name=".SyncAlarmReceiver"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:enabled="true"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:exported="false" />&ndash;&gt;-->
-
-<!--&lt;!&ndash;        <receiver android:name=".ClockoutAlarmReceiver" android:enabled="true" android:exported="false" />&ndash;&gt;-->
-
-<!--&lt;!&ndash;        &lt;!&ndash; ✅ NAYA: ServiceRestartReceiver — app kill ke baad reliable restart &ndash;&gt;&ndash;&gt;-->
-<!--&lt;!&ndash;        &lt;!&ndash; Direct PendingIntent.getService() se zyada reliable hai old MIUI/ColorOS/Vivo phones pe &ndash;&gt;&ndash;&gt;-->
-<!--&lt;!&ndash;        <receiver&ndash;&gt;-->
-<!--&lt;!&ndash;            android:name=".ServiceRestartReceiver"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:enabled="true"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:exported="false">&ndash;&gt;-->
-<!--&lt;!&ndash;            <intent-filter>&ndash;&gt;-->
-<!--&lt;!&ndash;                <action android:name="com.metaxperts.order_booking_app.RESTART_SERVICE" />&ndash;&gt;-->
-<!--&lt;!&ndash;            </intent-filter>&ndash;&gt;-->
-<!--&lt;!&ndash;        </receiver>&ndash;&gt;-->
-
-<!--&lt;!&ndash;        &lt;!&ndash; Add BulkPostAlarmReceiver - Independent alarm for bulk posting &ndash;&gt;&ndash;&gt;-->
-<!--&lt;!&ndash;        <receiver&ndash;&gt;-->
-<!--&lt;!&ndash;            android:name=".BulkPostAlarmReceiver"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:enabled="true"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:exported="false" />&ndash;&gt;-->
-
-<!--&lt;!&ndash;        &lt;!&ndash; WorkManager provider configuration &ndash;&gt;&ndash;&gt;-->
-<!--&lt;!&ndash;        <provider&ndash;&gt;-->
-<!--&lt;!&ndash;            android:name="androidx.startup.InitializationProvider"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:authorities="${applicationId}.androidx-startup"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:exported="false"&ndash;&gt;-->
-<!--&lt;!&ndash;            tools:node="merge">&ndash;&gt;-->
-<!--&lt;!&ndash;            <meta-data&ndash;&gt;-->
-<!--&lt;!&ndash;                android:name="androidx.work.WorkManagerInitializer"&ndash;&gt;-->
-<!--&lt;!&ndash;                android:value="androidx.startup"&ndash;&gt;-->
-<!--&lt;!&ndash;                tools:replace="android:value" />&ndash;&gt;-->
-<!--&lt;!&ndash;        </provider>&ndash;&gt;-->
-
-<!--&lt;!&ndash;        <service android:name=".ClockoutRingtoneService" android:enabled="true"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:exported="false" android:foregroundServiceType="mediaPlayback"&ndash;&gt;-->
-<!--&lt;!&ndash;            android:stopWithTask="false" />&ndash;&gt;-->
-
-<!--&lt;!&ndash;    </application>&ndash;&gt;-->
-
-<!--&lt;!&ndash;    <queries>&ndash;&gt;-->
-<!--&lt;!&ndash;        <intent>&ndash;&gt;-->
-<!--&lt;!&ndash;            <action android:name="android.intent.action.PROCESS_TEXT" />&ndash;&gt;-->
-<!--&lt;!&ndash;            <data android:mimeType="text/plain" />&ndash;&gt;-->
-<!--&lt;!&ndash;        </intent>&ndash;&gt;-->
-<!--&lt;!&ndash;    </queries>&ndash;&gt;-->
-
-<!--&lt;!&ndash;</manifest>&ndash;&gt;-->
-
-
-<!--&lt;!&ndash;<floatingBubble>&ndash;&gt;-->
-
-<!--&lt;!&ndash;</manifest>&ndash;&gt;-->
-
-
-<!--&lt;!&ndash;<floatingBubble>&ndash;&gt;-->
-<!--<manifest xmlns:android="http://schemas.android.com/apk/res/android"-->
-<!--    xmlns:tools="http://schemas.android.com/tools">-->
-
-<!--    <uses-permission android:name="android.permission.INTERNET" />-->
-<!--    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />-->
-<!--    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />-->
-<!--    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>-->
-<!--    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />-->
-<!--    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />-->
-<!--    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />-->
-<!--    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />-->
-<!--    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />-->
-<!--    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />-->
-
-<!--    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"-->
-<!--        android:maxSdkVersion="32" />-->
-<!--    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"-->
-<!--        android:maxSdkVersion="29" />-->
-<!--    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"-->
-<!--        tools:ignore="ScopedStorage" />-->
-
-<!--    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />-->
-<!--    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />-->
-<!--    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />-->
-<!--    <uses-permission android:name="android.permission.CAMERA" />-->
-<!--    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />-->
-<!--    <uses-permission android:name="android.permission.RECORD_AUDIO" />-->
-<!--    <uses-permission android:name="android.permission.READ_PHONE_STATE" />-->
-<!--    <uses-permission android:name="android.permission.READ_CONTACTS" />-->
-<!--    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />-->
-<!--    <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />-->
-<!--    <uses-permission android:name="android.permission.WAKE_LOCK" />-->
-<!--    <uses-permission android:name="android.permission.USE_BIOMETRIC"/>-->
-<!--    <uses-permission android:name="android.permission.USE_FINGERPRINT"/>-->
-<!--    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />-->
-<!--    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />-->
-
-<!--    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />-->
-<!--    <uses-permission android:name="android.permission.VIBRATE" />-->
-<!--    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />-->
-
-<!--    &lt;!&ndash; ✅ NEW: Floating bubble permission &ndash;&gt;-->
-<!--    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />-->
-
-<!--    <application-->
-<!--        android:label="BookIT"-->
-<!--        android:name="${applicationName}"-->
-<!--        android:icon="@mipmap/ic_launcher"-->
-<!--        android:enableOnBackInvokedCallback="true"-->
-<!--        android:networkSecurityConfig="@xml/network_security_config">-->
-
-<!--        <provider-->
-<!--            android:name="androidx.core.content.FileProvider"-->
-<!--            android:authorities="${applicationId}.fileprovider"-->
-<!--            android:exported="false"-->
-<!--            android:grantUriPermissions="true">-->
-<!--            <meta-data-->
-<!--                android:name="android.support.FILE_PROVIDER_PATHS"-->
-<!--                android:resource="@xml/file_paths" />-->
-<!--        </provider>-->
-
-<!--        <service-->
-<!--            android:name=".LocationMonitorService"-->
-<!--            android:enabled="true"-->
-<!--            android:exported="false"-->
-<!--            android:foregroundServiceType="location|dataSync"-->
-<!--            android:stopWithTask="false" />-->
-<!--        &lt;!&ndash; Floating Bubble Service &ndash;&gt;-->
-<!--        <service-->
-<!--            android:name=".FloatingBubbleService"-->
-<!--            android:enabled="true"-->
-<!--            android:exported="false"-->
-<!--            android:foregroundServiceType="location"-->
-<!--            android:stopWithTask="false" />-->
-
-<!--        <receiver-->
-<!--            android:name=".FloatingBubbleRestartReceiver"-->
-<!--            android:enabled="true"-->
-<!--            android:exported="false" />-->
-
-<!--        <receiver-->
-<!--            android:name=".BootCompletedReceiver"-->
-<!--            android:enabled="true"-->
-<!--            android:exported="true">-->
-<!--            <intent-filter>-->
-<!--                <action android:name="android.intent.action.BOOT_COMPLETED" />-->
-<!--                <action android:name="android.intent.action.QUICKBOOT_POWERON" />-->
-<!--                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />-->
-<!--                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />-->
-<!--            </intent-filter>-->
-<!--        </receiver>-->
-
-<!--        <meta-data-->
-<!--            android:name="com.google.android.geo.API_KEY"-->
-<!--            android:value="AIzaSyB75e8drxN6oXb4U2V2c56yccRrEjmDmHo" />-->
-
-<!--        <meta-data-->
-<!--            android:name="com.google.android.gms.version"-->
-<!--            android:value="@integer/google_play_services_version" />-->
-
-<!--        <activity-->
-<!--            android:name=".MainActivity"-->
-<!--            android:exported="true"-->
-<!--            android:launchMode="singleTop"-->
-<!--            android:taskAffinity=""-->
-<!--            android:theme="@style/LaunchTheme"-->
-<!--            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"-->
-<!--            android:hardwareAccelerated="true"-->
-<!--            android:windowSoftInputMode="adjustResize"-->
-<!--            android:showWhenLocked="true"-->
-<!--            android:turnScreenOn="true">-->
-<!--            <meta-data-->
-<!--                android:name="io.flutter.embedding.android.NormalTheme"-->
-<!--                android:resource="@style/NormalTheme" />-->
-<!--            <intent-filter>-->
-<!--                <action android:name="android.intent.action.MAIN" />-->
-<!--                <category android:name="android.intent.category.LAUNCHER" />-->
-<!--            </intent-filter>-->
-<!--        </activity>-->
-
-<!--        <service-->
-<!--            android:name="id.flutter.flutter_background_service.BackgroundService"-->
-<!--            android:foregroundServiceType="location" />-->
-
-<!--        <meta-data-->
-<!--            android:name="flutterEmbedding"-->
-<!--            android:value="2" />-->
-
-<!--        <service-->
-<!--            android:name="androidx.work.impl.background.SystemJobService"-->
-<!--            android:permission="android.permission.BIND_JOB_SERVICE"-->
-<!--            android:exported="true"-->
-<!--            tools:node="merge" />-->
-
-<!--        <receiver-->
-<!--            android:name="androidx.work.impl.background.systemalarm.SystemAlarmScheduler"-->
-<!--            android:exported="false"-->
-<!--            tools:node="merge" />-->
-
-<!--        <receiver-->
-<!--            android:name="androidx.work.impl.background.systemalarm.RescheduleReceiver"-->
-<!--            android:exported="false"-->
-<!--            android:directBootAware="false"-->
-<!--            tools:node="merge">-->
-<!--            <intent-filter>-->
-<!--                <action android:name="android.intent.action.BOOT_COMPLETED" />-->
-<!--                <action android:name="android.intent.action.TIME_SET" />-->
-<!--                <action android:name="android.intent.action.TIMEZONE_CHANGED" />-->
-<!--            </intent-filter>-->
-<!--        </receiver>-->
-
-<!--        <receiver-->
-<!--            android:name=".SyncAlarmReceiver"-->
-<!--            android:enabled="true"-->
-<!--            android:exported="false" />-->
-
-<!--        <receiver android:name=".ClockoutAlarmReceiver" android:enabled="true" android:exported="false" />-->
-
-<!--        <receiver-->
-<!--            android:name=".ServiceRestartReceiver"-->
-<!--            android:enabled="true"-->
-<!--            android:exported="false">-->
-<!--            <intent-filter>-->
-<!--                <action android:name="com.metaxperts.order_booking_app.RESTART_SERVICE" />-->
-<!--            </intent-filter>-->
-<!--        </receiver>-->
-
-<!--        <receiver-->
-<!--            android:name=".BulkPostAlarmReceiver"-->
-<!--            android:enabled="true"-->
-<!--            android:exported="false" />-->
-
-<!--        &lt;!&ndash; ✅ NEW: Floating bubble restart receiver &ndash;&gt;-->
-<!--        <receiver-->
-<!--            android:name=".FloatingBubbleRestartReceiver"-->
-<!--            android:enabled="true"-->
-<!--            android:exported="false" />-->
-
-<!--        <provider-->
-<!--            android:name="androidx.startup.InitializationProvider"-->
-<!--            android:authorities="${applicationId}.androidx-startup"-->
-<!--            android:exported="false"-->
-<!--            tools:node="merge">-->
-<!--            <meta-data-->
-<!--                android:name="androidx.work.WorkManagerInitializer"-->
-<!--                android:value="androidx.startup"-->
-<!--                tools:replace="android:value" />-->
-<!--        </provider>-->
-
-<!--        <service android:name=".ClockoutRingtoneService" android:enabled="true"-->
-<!--            android:exported="false" android:foregroundServiceType="mediaPlayback"-->
-<!--            android:stopWithTask="false" />-->
-
-<!--    </application>-->
-
-<!--    <queries>-->
-<!--        <intent>-->
-<!--            <action android:name="android.intent.action.PROCESS_TEXT" />-->
-<!--            <data android:mimeType="text/plain" />-->
-<!--        </intent>-->
-<!--    </queries>-->
-
-<!--</manifest>-->
-
-
-
-<!--<floatingBubble>-->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
@@ -419,15 +11,9 @@
     <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
-
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
-        android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="29" />
-
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
-    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
@@ -440,13 +26,8 @@
     <uses-permission android:name="android.permission.USE_FINGERPRINT"/>
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
-
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.VIBRATE" />
-    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
-
-    <!-- ✅ NEW: Floating bubble permission -->
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <application
         android:label="BookIT"
@@ -454,6 +35,10 @@
         android:icon="@mipmap/ic_launcher"
         android:enableOnBackInvokedCallback="true"
         android:networkSecurityConfig="@xml/network_security_config">
+
+        <meta-data
+            android:name="io.flutter.embedding.android.EnableImpeller"
+            android:value="false" />
 
         <provider
             android:name="androidx.core.content.FileProvider"
@@ -465,24 +50,13 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
+        <!-- Location Monitor Service — GPS tracking -->
         <service
             android:name=".LocationMonitorService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="location"
             android:stopWithTask="false" />
-        <!-- Floating Bubble Service -->
-        <service
-            android:name=".FloatingBubbleService"
-            android:enabled="true"
-            android:exported="false"
-            android:foregroundServiceType="location"
-            android:stopWithTask="false" />
-
-        <receiver
-            android:name=".FloatingBubbleRestartReceiver"
-            android:enabled="true"
-            android:exported="false" />
 
         <receiver
             android:name=".BootCompletedReceiver"
@@ -532,29 +106,6 @@
             android:name="flutterEmbedding"
             android:value="2" />
 
-<!--        <service-->
-<!--            android:name="androidx.work.impl.background.SystemJobService"-->
-<!--            android:permission="android.permission.BIND_JOB_SERVICE"-->
-<!--            android:exported="true"-->
-<!--            tools:node="merge" />-->
-
-<!--        <receiver-->
-<!--            android:name="androidx.work.impl.background.systemalarm.SystemAlarmScheduler"-->
-<!--            android:exported="false"-->
-<!--            tools:node="merge" />-->
-
-<!--        <receiver-->
-<!--            android:name="androidx.work.impl.background.systemalarm.RescheduleReceiver"-->
-<!--            android:exported="false"-->
-<!--            android:directBootAware="false"-->
-<!--            tools:node="merge">-->
-<!--            <intent-filter>-->
-<!--                <action android:name="android.intent.action.BOOT_COMPLETED" />-->
-<!--                <action android:name="android.intent.action.TIME_SET" />-->
-<!--                <action android:name="android.intent.action.TIMEZONE_CHANGED" />-->
-<!--            </intent-filter>-->
-<!--        </receiver>-->
-
         <receiver
             android:name=".SyncAlarmReceiver"
             android:enabled="true"
@@ -572,13 +123,15 @@
         </receiver>
 
         <receiver
-            android:name=".BulkPostAlarmReceiver"
-            android:enabled="true"
-            android:exported="false" />
+            android:name=".MidnightClockoutReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.metaxperts.order_booking_app.MIDNIGHT_CLOCKOUT"/>
+            </intent-filter>
+        </receiver>
 
-        <!-- ✅ NEW: Floating bubble restart receiver -->
         <receiver
-            android:name=".FloatingBubbleRestartReceiver"
+            android:name=".BulkPostAlarmReceiver"
             android:enabled="true"
             android:exported="false" />
 

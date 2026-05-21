@@ -1,6 +1,5 @@
 //
-//
-/////09-05-2026
+/////clockout
 //package com.metaxperts.order_booking_app
 //
 //import android.Manifest
@@ -66,6 +65,7 @@
 //    private val WAKELOCK_TIMEOUT_MS   = 12 * 60 * 60 * 1000L  // 12 hours
 //    private val WATCHDOG_INTERVAL     = 30_000L
 //    private val GPS_HEARTBEAT_TIMEOUT = 60_000L
+//    private val PREF_HTTP_POST_ANCHOR = "flutter.http_post_anchor_ms"
 //
 //    // MQTT Broker
 //    private val MQTT_HOST    = "119.153.102.7"
@@ -117,7 +117,7 @@
 //
 //    private var wakeLock: PowerManager.WakeLock? = null
 //
-//    // ✅ NEW: CPU WakeLock for heartbeat
+//    // CPU WakeLock for heartbeat
 //    private var cpuWakeLock: PowerManager.WakeLock? = null
 //    private var heartbeatRunnable: Runnable? = null
 //    private var lastSuccessfulPostTime = 0L
@@ -144,6 +144,17 @@
 //    @Volatile private var lastAccuracy = 0f
 //    @Volatile private var lastSpeed    = 0f
 //    private var lastHeartbeatTime: Long = 0
+//
+//    // ── Dynamic GPS Policy (backend se fetch, offline mein cache se) ──────────
+//    @Volatile private var gpsPolicy: GpsPolicy = GpsPolicy(
+//        locationIntervalSec = 60L,
+//        gpsAccuracy         = "high"
+//    )
+//    private var policyRefreshRunnable: Runnable? = null
+//
+//    // ── HTTP post loop — anchor-based exact timing ────────────────────────────
+//    @Volatile private var httpPostAnchorMs = 0L
+//    private var httpPostRunnable: Runnable? = null
 //
 //    // MQTT
 //    private var mqttClient: MqttClient? = null
@@ -190,6 +201,13 @@
 //
 //    // ─── Companion (start / stop helpers) ────────────────────────────────────
 //    companion object {
+//        // ✅ FIX: Static isRunning flag — BulkPostAlarmReceiver is check se double posting avoid karta hai
+//        // Jab service chal rahi ho to alarm-based sync skip hoga (service khud sync karti hai)
+//        // Jab service band ho to alarm sync karta hai (fallback mode)
+//        @Volatile
+//        var isRunning = false
+//            private set
+//
 //        fun start(
 //            context: Context,
 //            userId: String = "",
@@ -220,6 +238,8 @@
 //
 //    override fun onCreate() {
 //        super.onCreate()
+//        // ✅ FIX: Service shuru hote hi isRunning = true
+//        isRunning = true
 //        handler = Handler(Looper.getMainLooper())
 //
 //        try {
@@ -332,9 +352,11 @@
 //
 //        startMonitoring()
 //
-//        // ✅ NEW: Start backup systems when clocked in
+//        // ✅ FIX: Backup systems start karo — resetAnchor=true taake fresh anchor set ho.
+//        // ServiceRestartReceiver se alarm call HATA diya gaya hai.
+//        // Sirf yahan se ek jagah se start hoga — double posting nahi hogi.
 //        if (clockedIn && !isFrozen) {
-//            BulkPostingScheduler.startBulkPostingAlarm(this)
+//            BulkPostingScheduler.startBulkPostingAlarm(this, resetAnchor = true)
 //            try {
 //                WorkManagerBulkPoster.schedule(this)
 //            } catch (e: Exception) {
@@ -359,6 +381,9 @@
 //
 //    override fun onDestroy() {
 //        isDestroyed = true
+//        // ✅ FIX: Service band hote hi isRunning = false
+//        // Ab BulkPostAlarmReceiver janega ke service nahi chal rahi — fallback sync karo
+//        isRunning = false
 //
 //        val prefs     = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 //        val clockedIn = prefs.getBoolean(KEY_IS_CLOCKED_IN, false)
@@ -373,6 +398,7 @@
 //                else
 //                    "System ClockOut - Location Off"
 //                saveCriticalEventToPrefs(prefs, reason)
+//                MidnightClockoutReceiver.cancel(this)
 //            } else {
 //                debugPrint("🔄 [Service] onDestroy while clocked in — scheduling restart (old device fix)")
 //                scheduleServiceRestart()
@@ -405,6 +431,11 @@
 //    // ═════════════════════════════════════════════════════════════════════════
 //
 //    private fun startMonitoring() {
+//        // ✅ STEP 1: Policy SYNCHRONOUSLY cache se load karo — loops start hone se PEHLE
+//        val cachedPolicy = GpsPolicyManager.fetchPolicy(this, forceRefresh = false)
+//        gpsPolicy = cachedPolicy
+//        debugPrint("📋 [Policy] Loaded from cache at startup — interval=${gpsPolicy.locationIntervalSec}s accuracy=${gpsPolicy.gpsAccuracy}")
+//
 //        startLocationUpdates()
 //
 //        checkRunnable = CheckRunnable()
@@ -412,18 +443,75 @@
 //
 //        startMqttPublishing()
 //
-//        debugPrint("✅ [Service] All loops started (GPS every 2s, MQTT every 5s)")
-//        startHttpPostLoop()
+//        debugPrint("✅ [Service] All loops started")
 //
-//        // ✅ NEW: Start heartbeat for regular bulk sync
+//        // ✅ STEP 2: Anchor-based exact HTTP post loop (drift-free)
+//        // resetAnchor = false — saved anchor restore karo agar available ho
+//        // (service restart ke baad bhi same cadence maintain ho)
+//        restartHttpPostLoop(resetAnchor = false)
+//
+//        // ✅ STEP 3: Backend se async fresh policy fetch
+//        mqttExecutor.submit { loadAndApplyPolicy(forceRefresh = true) }
+//
+//        // ✅ Start heartbeat for regular bulk sync
 //        startHeartbeat()
 //
-//        // ✅ Start working timer — Kotlin side (all devices pe survive karta hai)
+//        // ✅ Start working timer — Kotlin side
 //        startWorkingTimer()
 //
-//        // ✅ FIX: Doze-proof keep-alive — har 15 min ek alarm reschedule karo
-//        // Jab device Doze se bahar aata hai yeh alarm fire hoga aur service alive confirm karega
+//        // ✅ Doze-proof keep-alive — har 15 min ek alarm reschedule karo
 //        scheduleKeepAliveAlarm()
+//
+//        // ✅ Schedule midnight 23:58 auto clockout
+//        MidnightClockoutReceiver.schedule(this)
+//
+//        // ✅ Background policy refresh har 5 minute
+//        startPolicyRefreshLoop()
+//    }
+//
+//    // ─── GPS Policy Functions ─────────────────────────────────────────────────
+//
+//    private fun loadAndApplyPolicy(forceRefresh: Boolean = false) {
+//        val newPolicy = GpsPolicyManager.fetchPolicy(this, forceRefresh)
+//        val intervalChanged = newPolicy.locationIntervalSec != gpsPolicy.locationIntervalSec
+//        val accuracyChanged = newPolicy.gpsAccuracy != gpsPolicy.gpsAccuracy
+//
+//        gpsPolicy = newPolicy
+//        debugPrint("📋 [Policy] Applied — interval=${gpsPolicy.locationIntervalSec}s accuracy=${gpsPolicy.gpsAccuracy}")
+//
+//        if ((accuracyChanged || intervalChanged) && locationListener != null) {
+//            handler.post {
+//                debugPrint("🔄 [Policy] GPS provider restart — interval=${gpsPolicy.locationIntervalSec}s accuracy=${gpsPolicy.gpsAccuracy}")
+//                stopLocationUpdates()
+//                startLocationUpdates()
+//            }
+//        }
+//
+//        if (intervalChanged) {
+//            debugPrint("🔄 [Policy] Interval changed to ${gpsPolicy.locationIntervalSec}s — restarting HTTP post loop")
+//            handler.post { restartHttpPostLoop(resetAnchor = true) }
+//        }
+//    }
+//
+//    private fun startPolicyRefreshLoop() {
+//        policyRefreshRunnable = object : Runnable {
+//            override fun run() {
+//                if (isDestroyed) return
+//                mqttExecutor.submit { loadAndApplyPolicy(forceRefresh = true) }
+//                handler.postDelayed(this, 5 * 60_000L)
+//            }
+//        }
+//        handler.postDelayed(policyRefreshRunnable!!, 5 * 60_000L)
+//        debugPrint("✅ [Policy] 5-min refresh loop started")
+//    }
+//
+//    private fun onNetworkRestored() {
+//        handler.postDelayed({
+//            if (!isDestroyed) {
+//                mqttExecutor.submit { loadAndApplyPolicy(forceRefresh = true) }
+//                debugPrint("🔄 [Policy] Re-synced after network restore")
+//            }
+//        }, 5_000L)
 //    }
 //
 //    private fun scheduleKeepAliveAlarm() {
@@ -438,12 +526,10 @@
 //        }
 //        val pIntent = PendingIntent.getBroadcast(
 //            applicationContext,
-//            99,  // unique request code for keep-alive
+//            99,
 //            keepAliveIntent,
 //            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
 //        )
-//        // 15 minute baad fire hoga — agar service zinda hai toh onStartCommand phir se run
-//        // hoga lekin koi harm nahi (idempotent) — agar service mari hai toh restart ho jaayegi
 //        val triggerAt = android.os.SystemClock.elapsedRealtime() + 15 * 60 * 1000L
 //        try {
 //            when {
@@ -460,7 +546,8 @@
 //        }
 //    }
 //
-//    // ✅ NEW: Start heartbeat for CPU wake and bulk sync
+//    // ─── Heartbeat ────────────────────────────────────────────────────────────
+//
 //    private fun startHeartbeat() {
 //        heartbeatRunnable = object : Runnable {
 //            override fun run() {
@@ -472,7 +559,6 @@
 //
 //                if (clockedIn && !isFrozen) {
 //                    acquireCpuWakeLock()
-//
 //                    mqttExecutor.submit {
 //                        syncUnpostedRows()
 //                        debugPrint("💓 [Heartbeat] Bulk sync executed")
@@ -488,7 +574,6 @@
 //        debugPrint("✅ [Heartbeat] Started (30s interval)")
 //    }
 //
-//    // ✅ NEW: Acquire CPU wake lock
 //    private fun acquireCpuWakeLock() {
 //        try {
 //            if (cpuWakeLock == null) {
@@ -507,20 +592,80 @@
 //        }
 //    }
 //
-//    private fun startHttpPostLoop() {
-//        handler.post(object : Runnable {
-//            override fun run() {
-//                if (isDestroyed) return
-//                val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-//                val clockedIn = prefs.getBoolean(KEY_IS_CLOCKED_IN, false)
-//                val isFrozen  = prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)
+//    // ─── Anchor-based exact HTTP post loop ───────────────────────────────────
+//    // ✅ FIX: resetAnchor=false on service restart — saved anchor se resume karo
+//    // resetAnchor=true sirf policy change ya fresh clockIn pe
+//    // Is se app kill/restart ke baad bhi same 60s cadence maintain hota hai
+//    private fun restartHttpPostLoop(resetAnchor: Boolean = false) {
+//        httpPostRunnable?.let { handler.removeCallbacks(it) }
+//        httpPostRunnable = null
 //
-//                if (clockedIn && !isFrozen) {
-//                    mqttExecutor.submit { postLocationToServer(prefs) }
-//                }
-//                handler.postDelayed(this, 15_000L)
+//        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+//
+//        if (resetAnchor) {
+//            httpPostAnchorMs = android.os.SystemClock.elapsedRealtime()
+//            prefs.edit().putLong(PREF_HTTP_POST_ANCHOR, httpPostAnchorMs).apply()
+//            debugPrint("⚓ [HttpLoop] Anchor RESET at elapsed=$httpPostAnchorMs")
+//        } else {
+//            // App kill ke baad saved anchor restore karo — interval double nahi hoga
+//            val savedAnchor = prefs.getLong(PREF_HTTP_POST_ANCHOR, 0L)
+//            if (savedAnchor > 0L) {
+//                httpPostAnchorMs = savedAnchor
+//                debugPrint("⚓ [HttpLoop] Restored saved anchor at elapsed=$httpPostAnchorMs")
+//            } else {
+//                httpPostAnchorMs = android.os.SystemClock.elapsedRealtime()
+//                prefs.edit().putLong(PREF_HTTP_POST_ANCHOR, httpPostAnchorMs).apply()
+//                debugPrint("⚓ [HttpLoop] No saved anchor — set new at elapsed=$httpPostAnchorMs")
 //            }
-//        })
+//        }
+//
+//        scheduleNextHttpTick()
+//        debugPrint("✅ [HttpLoop] Started — interval=${gpsPolicy.locationIntervalSec}s anchor-based")
+//    }
+//
+//    private fun scheduleNextHttpTick() {
+//        if (isDestroyed) return
+//
+//        val intervalMs = gpsPolicy.locationIntervalSec * 1000L
+//        val now = android.os.SystemClock.elapsedRealtime()
+//
+//        var anchor = httpPostAnchorMs
+//        if (anchor == 0L) {
+//            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+//            anchor = prefs.getLong(PREF_HTTP_POST_ANCHOR, 0L)
+//            if (anchor == 0L) {
+//                anchor = now
+//                httpPostAnchorMs = anchor
+//                prefs.edit().putLong(PREF_HTTP_POST_ANCHOR, anchor).apply()
+//            } else {
+//                httpPostAnchorMs = anchor
+//            }
+//            debugPrint("⚓ [HttpLoop] Recovered anchor=$anchor")
+//        }
+//
+//        val elapsed = now - anchor
+//        val ticksDone = elapsed / intervalMs
+//        val nextMs = (ticksDone + 1) * intervalMs
+//        var delayMs = (anchor + nextMs) - now
+//
+//        if (delayMs <= 0L) {
+//            delayMs = intervalMs - (elapsed % intervalMs)
+//            if (delayMs <= 0L) delayMs = 200L
+//        }
+//
+//        debugPrint("⏱️ [HttpLoop] Next tick in ${delayMs}ms (interval=${intervalMs}ms)")
+//
+//        httpPostRunnable = Runnable {
+//            if (isDestroyed) return@Runnable
+//            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+//            val clockedIn = prefs.getBoolean(KEY_IS_CLOCKED_IN, false)
+//            val isFrozen = prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)
+//            if (clockedIn && !isFrozen) {
+//                mqttExecutor.submit { postLocationToServer(prefs) }
+//            }
+//            scheduleNextHttpTick()
+//        }
+//        handler.postDelayed(httpPostRunnable!!, delayMs)
 //    }
 //
 //    private fun stopAllLoops() {
@@ -528,9 +673,10 @@
 //        mqttPublishRunnable?.let  { handler.removeCallbacks(it) }
 //        mqttReconnectRunnable?.let{ handler.removeCallbacks(it) }
 //        locationPostRunnable?.let { handler.removeCallbacks(it) }
-//        heartbeatRunnable?.let    { handler.removeCallbacks(it) }  // ✅ NEW
-//        workingTimerRunnable?.let { handler.removeCallbacks(it) }  // Working timer
-//        // ✅ FIX: Working notification explicitly cancel karo clockout pe
+//        heartbeatRunnable?.let    { handler.removeCallbacks(it) }
+//        workingTimerRunnable?.let { handler.removeCallbacks(it) }
+//        policyRefreshRunnable?.let{ handler.removeCallbacks(it) }
+//        httpPostRunnable?.let     { handler.removeCallbacks(it) }
 //        try { (getSystemService(NotificationManager::class.java)).cancel(WORKING_NOTIFICATION_ID) } catch (_: Exception) {}
 //        handler.removeCallbacksAndMessages(null)
 //        stopLocationUpdates()
@@ -552,7 +698,15 @@
 //
 //            locationListener = object : LocationListener {
 //                override fun onLocationChanged(loc: Location) {
-//                    if (loc.accuracy > 100f) return
+//                    val maxAccuracy = when (gpsPolicy.gpsAccuracy) {
+//                        "best"   -> 20f
+//                        "high"   -> 50f
+//                        "medium" -> 100f
+//                        "low"    -> 200f
+//                        "lowest" -> 500f
+//                        else     -> 100f
+//                    }
+//                    if (loc.accuracy > maxAccuracy) return
 //
 //                    synchronized(recentFixes) {
 //                        if (recentFixes.size >= 3) recentFixes.removeFirst()
@@ -578,20 +732,22 @@
 //            gpsThread = android.os.HandlerThread("gps-callback-thread").also { it.start() }
 //            gpsLooper = gpsThread!!.looper
 //
+//            val gpsIntervalMs = gpsPolicy.locationIntervalSec * 1000L
+//
 //            listOf(SysLocationManager.GPS_PROVIDER, SysLocationManager.NETWORK_PROVIDER)
 //                .forEach { provider ->
 //                    try {
 //                        if (locationManager?.isProviderEnabled(provider) == true) {
 //                            locationManager?.requestLocationUpdates(
 //                                provider,
-//                                2_000L,
+//                                gpsIntervalMs,
 //                                0f,
 //                                locationListener!!, gpsLooper!!
 //                            )
 //                        }
 //                    } catch (_: Exception) {}
 //                }
-//            debugPrint("✅ [GPS] Location updates started")
+//            debugPrint("✅ [GPS] Location updates started — interval=${gpsPolicy.locationIntervalSec}s accuracy=${gpsPolicy.gpsAccuracy}")
 //        } catch (e: Exception) {
 //            debugPrint("⚠️ [GPS] startLocationUpdates failed: ${e.message}")
 //        }
@@ -810,7 +966,7 @@
 //    }
 //
 //    private fun syncUnpostedRows() {
-//        val BULK_API = "http://103.149.33.102:8001/location/bulk"
+//        val BULK_API = "http://119.153.102.7:8001/location/bulk"
 //
 //        val unposted = try { nativeDb.getUnpostedRows() } catch (e: Exception) {
 //            debugPrint("❌ [HTTP] DB read failed: ${e.message}")
@@ -882,8 +1038,6 @@
 //                .apply()
 //        }
 //
-//        // ✅ FIX 1: Pehle directly service start karne ki koshish karo (fastest restart)
-//        // Doze mein alarm delay hota hai lekin startForegroundService immediate hota hai
 //        try {
 //            val directIntent = Intent(applicationContext, LocationMonitorService::class.java).apply {
 //                putExtra("extra_user_id",      userId)
@@ -906,7 +1060,6 @@
 //            action = ServiceRestartReceiver.ACTION_RESTART_SERVICE
 //        }
 //
-//        // ✅ FIX 2: 5 alarm points — Doze batches defer karta hai, zyada attempts = zyada chance
 //        val delays = longArrayOf(1_500L, 8_000L, 30_000L, 60_000L, 120_000L)
 //        delays.forEachIndexed { index, delay ->
 //            val pIntent = PendingIntent.getBroadcast(
@@ -953,7 +1106,8 @@
 //        stopAllLoops()
 //        disconnectMqtt()
 //
-//        // Cancel working timer notification on clockout
+//        MidnightClockoutReceiver.cancel(this)
+//
 //        try { (getSystemService(NotificationManager::class.java)).cancel(WORKING_NOTIFICATION_ID) } catch (_: Exception) {}
 //        try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) {}
 //        stopSelf()
@@ -1151,13 +1305,14 @@
 //                .build()
 //            networkCallback = object : ConnectivityManager.NetworkCallback() {
 //                override fun onAvailable(network: Network) {
-//                    debugPrint("🌐 [Network] Internet available — triggering MQTT reconnect")
+//                    debugPrint("🌐 [Network] Internet available — triggering MQTT reconnect + policy refresh")
 //                    handler.post {
 //                        if (!isDestroyed && !isMqttConnected) {
 //                            mqttReconnectRunnable?.let { handler.removeCallbacks(it) }
 //                            mqttReconnectRunnable = null
 //                            connectMqtt()
 //                        }
+//                        onNetworkRestored()
 //                    }
 //                }
 //                override fun onLost(network: Network) {
@@ -1224,20 +1379,13 @@
 //
 //    private fun debugPrint(msg: String) = android.util.Log.d("LocationMonitor", msg)
 //
-//    // ─── Working Timer (Kotlin side — all devices pe survive karta hai) ────────
+//    // ─── Working Timer ────────────────────────────────────────────────────────
 //
 //    private fun startWorkingTimer() {
 //        workingTimerRunnable?.let { handler.removeCallbacks(it) }
 //        workingTimerRunnable = object : Runnable {
 //            override fun run() {
 //                if (isDestroyed) return
-//
-//                // ✅ FIX: isClockedIn check NAHI karo yahan
-//                // Critical event (location off/permission revoked) isClockedIn=false likh deta tha
-//                // aur timer khud band ho jaata tha jabke user ne manually clockout nahi kiya tha.
-//                // Timer sirf 2 jagah band hoga: (1) stopAllLoops() — jo sirf actual clockout/destroy pe chal
-//                // aur (2) isDestroyed=true — service destroy hone pe
-//                // isFrozen bhi check nahi karein — frozen pe bhi time dikhana chahiye
 //
 //                workingSeconds++
 //                val hours   = workingSeconds / 3600
@@ -1256,7 +1404,7 @@
 //
 //    private fun updateWorkingNotification(timeStr: String) {
 //        val pi = PendingIntent.getActivity(
-//            this, 1,  // requestCode 1 — NOTIFICATION_ID=1001 se alag
+//            this, 1,
 //            packageManager.getLaunchIntentForPackage(packageName),
 //            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
 //        )
@@ -1265,7 +1413,7 @@
 //            .setContentText("Time: $timeStr")
 //            .setSmallIcon(R.mipmap.ic_launcher)
 //            .setContentIntent(pi)
-//            .setOngoing(true)   // Swipe se dismiss nahi hogi
+//            .setOngoing(true)
 //            .setSilent(true)
 //            .build()
 //        try {
@@ -1444,7 +1592,160 @@
 //        )
 //    }
 //}
-
+//
+//// ─────────────────────────────────────────────────────────────────────────────
+//// MidnightClockoutReceiver — fires at 23:58, works even when app is killed
+//// ─────────────────────────────────────────────────────────────────────────────
+//
+//class MidnightClockoutReceiver : BroadcastReceiver() {
+//
+//    companion object {
+//        const val ACTION_MIDNIGHT_CLOCKOUT = "com.metaxperts.order_booking_app.MIDNIGHT_CLOCKOUT"
+//
+//        fun schedule(context: Context) {
+//            val prefs     = context.getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+//            val clockedIn = prefs.getBoolean("flutter.isClockedIn", false)
+//            val isFrozen  = prefs.getBoolean("flutter.is_timer_frozen", false)
+//            if (!clockedIn || isFrozen) return
+//
+//            val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+//
+//            val intent = Intent(context, MidnightClockoutReceiver::class.java).apply {
+//                action = ACTION_MIDNIGHT_CLOCKOUT
+//            }
+//            val pi = PendingIntent.getBroadcast(
+//                context, 2358,
+//                intent,
+//                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+//            )
+//
+//            val now    = java.util.Calendar.getInstance()
+//            val target = java.util.Calendar.getInstance().apply {
+//                set(java.util.Calendar.HOUR_OF_DAY, 23)
+//                set(java.util.Calendar.MINUTE, 58)
+//                set(java.util.Calendar.SECOND, 0)
+//                set(java.util.Calendar.MILLISECOND, 0)
+//            }
+//            if (now.after(target)) target.add(java.util.Calendar.DAY_OF_MONTH, 1)
+//
+//            try {
+//                when {
+//                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && am.canScheduleExactAlarms() ->
+//                        am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, target.timeInMillis, pi)
+//                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ->
+//                        am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, target.timeInMillis, pi)
+//                    else ->
+//                        am.set(AlarmManager.RTC_WAKEUP, target.timeInMillis, pi)
+//                }
+//                android.util.Log.d("MidnightClockout", "✅ Midnight alarm scheduled for ${target.time}")
+//            } catch (e: Exception) {
+//                android.util.Log.d("MidnightClockout", "⚠️ Alarm schedule failed: ${e.message}")
+//            }
+//        }
+//
+//        fun cancel(context: Context) {
+//            try {
+//                val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+//                val intent = Intent(context, MidnightClockoutReceiver::class.java).apply {
+//                    action = ACTION_MIDNIGHT_CLOCKOUT
+//                }
+//                val pi = PendingIntent.getBroadcast(
+//                    context, 2358,
+//                    intent,
+//                    PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE
+//                )
+//                pi?.let { am.cancel(it) }
+//                android.util.Log.d("MidnightClockout", "✅ Midnight alarm cancelled")
+//            } catch (e: Exception) {
+//                android.util.Log.d("MidnightClockout", "⚠️ Alarm cancel failed: ${e.message}")
+//            }
+//        }
+//    }
+//
+//    override fun onReceive(context: Context, intent: Intent?) {
+//        if (intent?.action != ACTION_MIDNIGHT_CLOCKOUT) return
+//
+//        val prefs     = context.getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+//        val clockedIn = prefs.getBoolean("flutter.isClockedIn", false)
+//        val isFrozen  = prefs.getBoolean("flutter.is_timer_frozen", false)
+//
+//        android.util.Log.d("MidnightClockout", "⏰ Midnight alarm fired — clockedIn=$clockedIn frozen=$isFrozen")
+//
+//        if (!clockedIn || isFrozen) return
+//
+//        val now       = java.util.Date()
+//        val timestamp = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault()).format(now)
+//        val reason    = "System ClockOut - Midnight Time"
+//
+//        prefs.edit()
+//            .putBoolean("flutter.has_critical_event_pending", true)
+//            .putBoolean("has_critical_event_pending", true)
+//            .putString("flutter.critical_event_reason", reason)
+//            .putString("critical_event_reason", reason)
+//            .putString("flutter.critical_event_timestamp", timestamp)
+//            .putBoolean("flutter.is_timer_frozen", true)
+//            .putBoolean("flutter.isClockedIn", false)
+//            .putBoolean("isClockedIn", false)
+//            .putString("flutter.fastClockOutTime", timestamp)
+//            .putFloat("flutter.fastClockOutDistance", 0f)
+//            .putString("flutter.fastClockOutReason", reason)
+//            .putBoolean("flutter.hasFastClockOutData", true)
+//            .putBoolean("flutter.clockOutPending", true)
+//            .commit()
+//
+//        android.util.Log.d("MidnightClockout", "✅ Midnight clockout saved to prefs — user clocked out at $timestamp")
+//
+//        try {
+//            context.stopService(Intent(context, LocationMonitorService::class.java))
+//        } catch (e: Exception) {
+//            android.util.Log.d("MidnightClockout", "⚠️ stopService: ${e.message}")
+//        }
+//
+//        showMidnightNotification(context, timestamp)
+//    }
+//
+//    private fun showMidnightNotification(context: Context, time: String) {
+//        try {
+//            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+//            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+//                nm.createNotificationChannel(
+//                    NotificationChannel(
+//                        "urgent_auto_clockout_channel",
+//                        "URGENT Auto Clockout",
+//                        NotificationManager.IMPORTANCE_HIGH
+//                    ).apply {
+//                        enableVibration(true)
+//                        vibrationPattern = longArrayOf(0, 1000, 500, 1000)
+//                        enableLights(true)
+//                        lightColor = android.graphics.Color.RED
+//                    }
+//                )
+//            }
+//            val launchIntent = context.packageManager
+//                .getLaunchIntentForPackage(context.packageName)?.apply {
+//                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+//                }
+//            val pi = PendingIntent.getActivity(
+//                context, 0,
+//                launchIntent,
+//                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+//            )
+//            val n = NotificationCompat.Builder(context, "urgent_auto_clockout_channel")
+//                .setContentTitle("⏰ Auto Clock-Out at 11:58 PM")
+//                .setContentText("You were automatically clocked out. Open app to sync.")
+//                .setSmallIcon(R.mipmap.ic_launcher)
+//                .setPriority(NotificationCompat.PRIORITY_MAX)
+//                .setCategory(NotificationCompat.CATEGORY_ALARM)
+//                .setAutoCancel(true)
+//                .setContentIntent(pi)
+//                .setVibrate(longArrayOf(0, 1000, 500, 1000))
+//                .build()
+//            nm.notify(9997, n)
+//        } catch (e: Exception) {
+//            android.util.Log.d("MidnightClockout", "⚠️ Notification failed: ${e.message}")
+//        }
+//    }
+//}
 
 package com.metaxperts.order_booking_app
 
@@ -1501,16 +1802,25 @@ import java.util.concurrent.Executors
 class LocationMonitorService : Service() {
 
     // ─── Constants ───────────────────────────────────────────────────────────
-    private val CHANNEL_ID            = "location_monitor_channel"
-    private val URGENT_CHANNEL_ID     = "urgent_auto_clockout_channel"
-    private val NOTIFICATION_ID       = 1001
-    private val WORKING_NOTIFICATION_ID = 1002  // Working timer notification
-    private val CHECK_INTERVAL        = 2_000L
-    private val MQTT_PUBLISH_INTERVAL = 5_000L
-    private val MQTT_RECONNECT_DELAY  = 10_000L
-    private val WAKELOCK_TIMEOUT_MS   = 12 * 60 * 60 * 1000L  // 12 hours
-    private val WATCHDOG_INTERVAL     = 30_000L
-    private val GPS_HEARTBEAT_TIMEOUT = 60_000L
+    private val CHANNEL_ID              = "location_monitor_channel"
+    private val URGENT_CHANNEL_ID       = "urgent_auto_clockout_channel"
+    private val NOTIFICATION_ID         = 1001
+    private val WORKING_NOTIFICATION_ID = 1002
+    private val CHECK_INTERVAL          = 2_000L
+    private val MQTT_PUBLISH_INTERVAL   = 5_000L
+    private val MQTT_RECONNECT_DELAY    = 10_000L
+    private val WAKELOCK_TIMEOUT_MS     = 12 * 60 * 60 * 1000L  // 12 hours
+    private val WATCHDOG_INTERVAL       = 30_000L
+    private val GPS_HEARTBEAT_TIMEOUT   = 60_000L
+
+    // ✅ FIX: Wall-clock anchor key (System.currentTimeMillis) — reboot ke baad bhi valid rehta hai
+    // Purana PREF_HTTP_POST_ANCHOR (elapsedRealtime) reboot pe reset ho jata tha → wrong timing
+    private val PREF_HTTP_POST_ANCHOR_WALL = "flutter.http_post_anchor_wall_ms"
+
+    // ✅ FIX: Flutter ko signal karo ke Kotlin service master hai
+    // Flutter side ka _scheduleNextTick() is flag check karke GPS save skip karta hai
+    // Is se app kill/restart pe double posting band hoti hai
+    private val KEY_KOTLIN_MASTER = "flutter.kotlin_service_is_master"
 
     // MQTT Broker
     private val MQTT_HOST    = "119.153.102.7"
@@ -1562,7 +1872,7 @@ class LocationMonitorService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
 
-    // ✅ NEW: CPU WakeLock for heartbeat
+    // CPU WakeLock for heartbeat
     private var cpuWakeLock: PowerManager.WakeLock? = null
     private var heartbeatRunnable: Runnable? = null
     private var lastSuccessfulPostTime = 0L
@@ -1589,6 +1899,17 @@ class LocationMonitorService : Service() {
     @Volatile private var lastAccuracy = 0f
     @Volatile private var lastSpeed    = 0f
     private var lastHeartbeatTime: Long = 0
+
+    // ── Dynamic GPS Policy (backend se fetch, offline mein cache se) ──────────
+    @Volatile private var gpsPolicy: GpsPolicy = GpsPolicy(
+        locationIntervalSec = 60L,
+        gpsAccuracy         = "high"
+    )
+    private var policyRefreshRunnable: Runnable? = null
+
+    // ── HTTP post loop — wall-clock anchor-based exact timing ─────────────────
+    @Volatile private var httpPostAnchorMs = 0L
+    private var httpPostRunnable: Runnable? = null
 
     // MQTT
     private var mqttClient: MqttClient? = null
@@ -1635,6 +1956,11 @@ class LocationMonitorService : Service() {
 
     // ─── Companion (start / stop helpers) ────────────────────────────────────
     companion object {
+        // Static isRunning flag — BulkPostAlarmReceiver is check se double posting avoid karta hai
+        @Volatile
+        var isRunning = false
+            private set
+
         fun start(
             context: Context,
             userId: String = "",
@@ -1665,6 +1991,16 @@ class LocationMonitorService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        isRunning = true
+
+        // ✅ FIX: Flutter ko signal karo ke Kotlin service chal rahi hai (master mode)
+        // Flutter side ka _scheduleNextTick() is flag check karke GPS save skip karta hai
+        // Double posting completely band ho jati hai — app kill ho ya background mein ho
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_KOTLIN_MASTER, true)
+            .apply()
+
         handler = Handler(Looper.getMainLooper())
 
         try {
@@ -1682,7 +2018,7 @@ class LocationMonitorService : Service() {
         registerReceivers()
         registerAppOpsListener()
         registerNetworkCallback()
-        debugPrint("✅ [Service] onCreate complete")
+        debugPrint("✅ [Service] onCreate complete — Kotlin is master")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -1756,7 +2092,7 @@ class LocationMonitorService : Service() {
             }
         }
 
-        // ✅ Restore working timer from clockIn time (service restart ke baad bhi sahi time dikhe)
+        // Restore working timer from clockIn time
         if (clockedIn && !isFrozen) {
             val clockInTimeStr = prefs.getString("flutter.clockInTime", "") ?: ""
             if (clockInTimeStr.isNotEmpty()) {
@@ -1777,9 +2113,9 @@ class LocationMonitorService : Service() {
 
         startMonitoring()
 
-        // ✅ NEW: Start backup systems when clocked in
+        // Backup systems start karo — resetAnchor=true taake fresh wall-clock anchor set ho
         if (clockedIn && !isFrozen) {
-            BulkPostingScheduler.startBulkPostingAlarm(this)
+            BulkPostingScheduler.startBulkPostingAlarm(this, resetAnchor = true)
             try {
                 WorkManagerBulkPoster.schedule(this)
             } catch (e: Exception) {
@@ -1804,6 +2140,14 @@ class LocationMonitorService : Service() {
 
     override fun onDestroy() {
         isDestroyed = true
+        isRunning = false
+
+        // ✅ FIX: Flutter ko signal karo ke Kotlin service band ho gayi
+        // Ab Flutter fallback mode mein GPS save kar sakta hai (agar service restart nahi hoti)
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_KOTLIN_MASTER, false)
+            .apply()
 
         val prefs     = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val clockedIn = prefs.getBoolean(KEY_IS_CLOCKED_IN, false)
@@ -1818,6 +2162,7 @@ class LocationMonitorService : Service() {
                 else
                     "System ClockOut - Location Off"
                 saveCriticalEventToPrefs(prefs, reason)
+                MidnightClockoutReceiver.cancel(this)
             } else {
                 debugPrint("🔄 [Service] onDestroy while clocked in — scheduling restart (old device fix)")
                 scheduleServiceRestart()
@@ -1840,7 +2185,7 @@ class LocationMonitorService : Service() {
         mqttExecutor.shutdown()
 
         super.onDestroy()
-        debugPrint("🛑 [Service] onDestroy complete")
+        debugPrint("🛑 [Service] onDestroy complete — Kotlin master flag cleared")
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -1850,6 +2195,11 @@ class LocationMonitorService : Service() {
     // ═════════════════════════════════════════════════════════════════════════
 
     private fun startMonitoring() {
+        // STEP 1: Policy cache se load karo — loops start hone se PEHLE
+        val cachedPolicy = GpsPolicyManager.fetchPolicy(this, forceRefresh = false)
+        gpsPolicy = cachedPolicy
+        debugPrint("📋 [Policy] Loaded from cache at startup — interval=${gpsPolicy.locationIntervalSec}s accuracy=${gpsPolicy.gpsAccuracy}")
+
         startLocationUpdates()
 
         checkRunnable = CheckRunnable()
@@ -1857,18 +2207,74 @@ class LocationMonitorService : Service() {
 
         startMqttPublishing()
 
-        debugPrint("✅ [Service] All loops started (GPS every 2s, MQTT every 5s)")
-        startHttpPostLoop()
+        debugPrint("✅ [Service] All loops started")
 
-        // ✅ NEW: Start heartbeat for regular bulk sync
+        // STEP 2: Wall-clock anchor-based exact HTTP post loop (drift-free, reboot-safe)
+        // resetAnchor=false — saved anchor restore karo (service restart pe same cadence maintain ho)
+        restartHttpPostLoop(resetAnchor = false)
+
+        // STEP 3: Backend se async fresh policy fetch
+        mqttExecutor.submit { loadAndApplyPolicy(forceRefresh = true) }
+
+        // Start heartbeat for regular bulk sync
         startHeartbeat()
 
-        // ✅ Start working timer — Kotlin side (all devices pe survive karta hai)
+        // Start working timer — Kotlin side
         startWorkingTimer()
 
-        // ✅ FIX: Doze-proof keep-alive — har 15 min ek alarm reschedule karo
-        // Jab device Doze se bahar aata hai yeh alarm fire hoga aur service alive confirm karega
+        // Doze-proof keep-alive — har 15 min ek alarm reschedule karo
         scheduleKeepAliveAlarm()
+
+        // Schedule midnight 23:58 auto clockout
+        MidnightClockoutReceiver.schedule(this)
+
+        // Background policy refresh har 5 minute
+        startPolicyRefreshLoop()
+    }
+
+    // ─── GPS Policy Functions ─────────────────────────────────────────────────
+
+    private fun loadAndApplyPolicy(forceRefresh: Boolean = false) {
+        val newPolicy = GpsPolicyManager.fetchPolicy(this, forceRefresh)
+        val intervalChanged = newPolicy.locationIntervalSec != gpsPolicy.locationIntervalSec
+        val accuracyChanged = newPolicy.gpsAccuracy != gpsPolicy.gpsAccuracy
+
+        gpsPolicy = newPolicy
+        debugPrint("📋 [Policy] Applied — interval=${gpsPolicy.locationIntervalSec}s accuracy=${gpsPolicy.gpsAccuracy}")
+
+        if ((accuracyChanged || intervalChanged) && locationListener != null) {
+            handler.post {
+                debugPrint("🔄 [Policy] GPS provider restart — interval=${gpsPolicy.locationIntervalSec}s accuracy=${gpsPolicy.gpsAccuracy}")
+                stopLocationUpdates()
+                startLocationUpdates()
+            }
+        }
+
+        if (intervalChanged) {
+            debugPrint("🔄 [Policy] Interval changed to ${gpsPolicy.locationIntervalSec}s — restarting HTTP post loop")
+            handler.post { restartHttpPostLoop(resetAnchor = true) }
+        }
+    }
+
+    private fun startPolicyRefreshLoop() {
+        policyRefreshRunnable = object : Runnable {
+            override fun run() {
+                if (isDestroyed) return
+                mqttExecutor.submit { loadAndApplyPolicy(forceRefresh = true) }
+                handler.postDelayed(this, 5 * 60_000L)
+            }
+        }
+        handler.postDelayed(policyRefreshRunnable!!, 5 * 60_000L)
+        debugPrint("✅ [Policy] 5-min refresh loop started")
+    }
+
+    private fun onNetworkRestored() {
+        handler.postDelayed({
+            if (!isDestroyed) {
+                mqttExecutor.submit { loadAndApplyPolicy(forceRefresh = true) }
+                debugPrint("🔄 [Policy] Re-synced after network restore")
+            }
+        }, 5_000L)
     }
 
     private fun scheduleKeepAliveAlarm() {
@@ -1883,12 +2289,10 @@ class LocationMonitorService : Service() {
         }
         val pIntent = PendingIntent.getBroadcast(
             applicationContext,
-            99,  // unique request code for keep-alive
+            99,
             keepAliveIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        // 15 minute baad fire hoga — agar service zinda hai toh onStartCommand phir se run
-        // hoga lekin koi harm nahi (idempotent) — agar service mari hai toh restart ho jaayegi
         val triggerAt = android.os.SystemClock.elapsedRealtime() + 15 * 60 * 1000L
         try {
             when {
@@ -1905,7 +2309,8 @@ class LocationMonitorService : Service() {
         }
     }
 
-    // ✅ NEW: Start heartbeat for CPU wake and bulk sync
+    // ─── Heartbeat ────────────────────────────────────────────────────────────
+
     private fun startHeartbeat() {
         heartbeatRunnable = object : Runnable {
             override fun run() {
@@ -1917,7 +2322,6 @@ class LocationMonitorService : Service() {
 
                 if (clockedIn && !isFrozen) {
                     acquireCpuWakeLock()
-
                     mqttExecutor.submit {
                         syncUnpostedRows()
                         debugPrint("💓 [Heartbeat] Bulk sync executed")
@@ -1933,7 +2337,6 @@ class LocationMonitorService : Service() {
         debugPrint("✅ [Heartbeat] Started (30s interval)")
     }
 
-    // ✅ NEW: Acquire CPU wake lock
     private fun acquireCpuWakeLock() {
         try {
             if (cpuWakeLock == null) {
@@ -1952,20 +2355,93 @@ class LocationMonitorService : Service() {
         }
     }
 
-    private fun startHttpPostLoop() {
-        handler.post(object : Runnable {
-            override fun run() {
-                if (isDestroyed) return
-                val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                val clockedIn = prefs.getBoolean(KEY_IS_CLOCKED_IN, false)
-                val isFrozen  = prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)
+    // ─── Wall-clock anchor-based exact HTTP post loop ─────────────────────────
+    // ✅ FIX: elapsedRealtime() ki jagah System.currentTimeMillis() use karo
+    // elapsedRealtime() device reboot par reset ho jata hai → saved anchor stale ho jata tha
+    // → app kill/restart ke baad interval double ho jata tha (30s → 60s)
+    // Wall-clock ms-since-epoch persist hoti hai → reboot ke baad bhi correct delay milta hai
+    //
+    // resetAnchor=false → service restart ke baad saved anchor se resume karo (same cadence)
+    // resetAnchor=true  → policy change ya fresh clockIn (naya anchor abhi se)
+    private fun restartHttpPostLoop(resetAnchor: Boolean = false) {
+        httpPostRunnable?.let { handler.removeCallbacks(it) }
+        httpPostRunnable = null
 
-                if (clockedIn && !isFrozen) {
-                    mqttExecutor.submit { postLocationToServer(prefs) }
-                }
-                handler.postDelayed(this, 15_000L)
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val nowWall = System.currentTimeMillis()
+
+        if (resetAnchor) {
+            // Fresh anchor — naya clockIn ya policy change
+            httpPostAnchorMs = nowWall
+            prefs.edit().putLong(PREF_HTTP_POST_ANCHOR_WALL, httpPostAnchorMs).apply()
+            debugPrint("⚓ [HttpLoop] Anchor RESET (wall-clock) at $httpPostAnchorMs")
+        } else {
+            // App kill ke baad saved wall-clock anchor restore karo
+            val savedWall = prefs.getLong(PREF_HTTP_POST_ANCHOR_WALL, 0L)
+            if (savedWall > 0L && savedWall <= nowWall) {
+                // Valid saved anchor — restore karo (same cadence maintain hogi)
+                httpPostAnchorMs = savedWall
+                debugPrint("⚓ [HttpLoop] Restored wall-clock anchor = $httpPostAnchorMs (age=${(nowWall - savedWall) / 1000}s)")
+            } else {
+                // Koi valid anchor nahi — fresh set karo
+                httpPostAnchorMs = nowWall
+                prefs.edit().putLong(PREF_HTTP_POST_ANCHOR_WALL, httpPostAnchorMs).apply()
+                debugPrint("⚓ [HttpLoop] No valid anchor — new wall-clock anchor set at $httpPostAnchorMs")
             }
-        })
+        }
+
+        scheduleNextHttpTick()
+        debugPrint("✅ [HttpLoop] Started — interval=${gpsPolicy.locationIntervalSec}s wall-clock anchor")
+    }
+
+    private fun scheduleNextHttpTick() {
+        if (isDestroyed) return
+
+        val intervalMs = gpsPolicy.locationIntervalSec * 1000L
+
+        // ✅ FIX: Wall-clock (currentTimeMillis) use karo — elapsedRealtime nahi
+        val now = System.currentTimeMillis()
+
+        var anchor = httpPostAnchorMs
+        if (anchor == 0L) {
+            // In-memory anchor lost — SharedPreferences se recover karo
+            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            anchor = prefs.getLong(PREF_HTTP_POST_ANCHOR_WALL, 0L)
+            if (anchor == 0L || anchor > now) {
+                // Koi valid anchor nahi — fresh set karo
+                anchor = now
+                httpPostAnchorMs = anchor
+                prefs.edit().putLong(PREF_HTTP_POST_ANCHOR_WALL, anchor).apply()
+            } else {
+                httpPostAnchorMs = anchor
+            }
+            debugPrint("⚓ [HttpLoop] Recovered wall-clock anchor=$anchor")
+        }
+
+        // Next exact boundary compute karo
+        val elapsed   = now - anchor
+        val ticksDone = elapsed / intervalMs
+        val nextMs    = (ticksDone + 1) * intervalMs
+        var delayMs   = nextMs - elapsed  // ms until next boundary
+
+        if (delayMs <= 0L) {
+            delayMs = intervalMs - (elapsed % intervalMs)
+            if (delayMs <= 0L) delayMs = 200L
+        }
+
+        debugPrint("⏱️ [HttpLoop] Next tick in ${delayMs}ms (interval=${intervalMs}ms, elapsed=${elapsed}ms)")
+
+        httpPostRunnable = Runnable {
+            if (isDestroyed) return@Runnable
+            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val clockedIn = prefs.getBoolean(KEY_IS_CLOCKED_IN, false)
+            val isFrozen = prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)
+            if (clockedIn && !isFrozen) {
+                mqttExecutor.submit { postLocationToServer(prefs) }
+            }
+            scheduleNextHttpTick()
+        }
+        handler.postDelayed(httpPostRunnable!!, delayMs)
     }
 
     private fun stopAllLoops() {
@@ -1973,9 +2449,10 @@ class LocationMonitorService : Service() {
         mqttPublishRunnable?.let  { handler.removeCallbacks(it) }
         mqttReconnectRunnable?.let{ handler.removeCallbacks(it) }
         locationPostRunnable?.let { handler.removeCallbacks(it) }
-        heartbeatRunnable?.let    { handler.removeCallbacks(it) }  // ✅ NEW
-        workingTimerRunnable?.let { handler.removeCallbacks(it) }  // Working timer
-        // ✅ FIX: Working notification explicitly cancel karo clockout pe
+        heartbeatRunnable?.let    { handler.removeCallbacks(it) }
+        workingTimerRunnable?.let { handler.removeCallbacks(it) }
+        policyRefreshRunnable?.let{ handler.removeCallbacks(it) }
+        httpPostRunnable?.let     { handler.removeCallbacks(it) }
         try { (getSystemService(NotificationManager::class.java)).cancel(WORKING_NOTIFICATION_ID) } catch (_: Exception) {}
         handler.removeCallbacksAndMessages(null)
         stopLocationUpdates()
@@ -1997,7 +2474,15 @@ class LocationMonitorService : Service() {
 
             locationListener = object : LocationListener {
                 override fun onLocationChanged(loc: Location) {
-                    if (loc.accuracy > 100f) return
+                    val maxAccuracy = when (gpsPolicy.gpsAccuracy) {
+                        "best"   -> 20f
+                        "high"   -> 50f
+                        "medium" -> 100f
+                        "low"    -> 200f
+                        "lowest" -> 500f
+                        else     -> 100f
+                    }
+                    if (loc.accuracy > maxAccuracy) return
 
                     synchronized(recentFixes) {
                         if (recentFixes.size >= 3) recentFixes.removeFirst()
@@ -2023,20 +2508,22 @@ class LocationMonitorService : Service() {
             gpsThread = android.os.HandlerThread("gps-callback-thread").also { it.start() }
             gpsLooper = gpsThread!!.looper
 
+            val gpsIntervalMs = gpsPolicy.locationIntervalSec * 1000L
+
             listOf(SysLocationManager.GPS_PROVIDER, SysLocationManager.NETWORK_PROVIDER)
                 .forEach { provider ->
                     try {
                         if (locationManager?.isProviderEnabled(provider) == true) {
                             locationManager?.requestLocationUpdates(
                                 provider,
-                                2_000L,
+                                gpsIntervalMs,
                                 0f,
                                 locationListener!!, gpsLooper!!
                             )
                         }
                     } catch (_: Exception) {}
                 }
-            debugPrint("✅ [GPS] Location updates started")
+            debugPrint("✅ [GPS] Location updates started — interval=${gpsPolicy.locationIntervalSec}s accuracy=${gpsPolicy.gpsAccuracy}")
         } catch (e: Exception) {
             debugPrint("⚠️ [GPS] startLocationUpdates failed: ${e.message}")
         }
@@ -2255,8 +2742,7 @@ class LocationMonitorService : Service() {
     }
 
     private fun syncUnpostedRows() {
-        val BULK_API = "http://119.153.102.7:8001/location/bulk'"
-
+        val BULK_API = "http://119.153.102.7:8001/location/bulk"
 
         val unposted = try { nativeDb.getUnpostedRows() } catch (e: Exception) {
             debugPrint("❌ [HTTP] DB read failed: ${e.message}")
@@ -2328,8 +2814,6 @@ class LocationMonitorService : Service() {
                 .apply()
         }
 
-        // ✅ FIX 1: Pehle directly service start karne ki koshish karo (fastest restart)
-        // Doze mein alarm delay hota hai lekin startForegroundService immediate hota hai
         try {
             val directIntent = Intent(applicationContext, LocationMonitorService::class.java).apply {
                 putExtra("extra_user_id",      userId)
@@ -2352,7 +2836,6 @@ class LocationMonitorService : Service() {
             action = ServiceRestartReceiver.ACTION_RESTART_SERVICE
         }
 
-        // ✅ FIX 2: 5 alarm points — Doze batches defer karta hai, zyada attempts = zyada chance
         val delays = longArrayOf(1_500L, 8_000L, 30_000L, 60_000L, 120_000L)
         delays.forEachIndexed { index, delay ->
             val pIntent = PendingIntent.getBroadcast(
@@ -2399,7 +2882,8 @@ class LocationMonitorService : Service() {
         stopAllLoops()
         disconnectMqtt()
 
-        // Cancel working timer notification on clockout
+        MidnightClockoutReceiver.cancel(this)
+
         try { (getSystemService(NotificationManager::class.java)).cancel(WORKING_NOTIFICATION_ID) } catch (_: Exception) {}
         try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) {}
         stopSelf()
@@ -2597,13 +3081,14 @@ class LocationMonitorService : Service() {
                 .build()
             networkCallback = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
-                    debugPrint("🌐 [Network] Internet available — triggering MQTT reconnect")
+                    debugPrint("🌐 [Network] Internet available — triggering MQTT reconnect + policy refresh")
                     handler.post {
                         if (!isDestroyed && !isMqttConnected) {
                             mqttReconnectRunnable?.let { handler.removeCallbacks(it) }
                             mqttReconnectRunnable = null
                             connectMqtt()
                         }
+                        onNetworkRestored()
                     }
                 }
                 override fun onLost(network: Network) {
@@ -2670,20 +3155,13 @@ class LocationMonitorService : Service() {
 
     private fun debugPrint(msg: String) = android.util.Log.d("LocationMonitor", msg)
 
-    // ─── Working Timer (Kotlin side — all devices pe survive karta hai) ────────
+    // ─── Working Timer ────────────────────────────────────────────────────────
 
     private fun startWorkingTimer() {
         workingTimerRunnable?.let { handler.removeCallbacks(it) }
         workingTimerRunnable = object : Runnable {
             override fun run() {
                 if (isDestroyed) return
-
-                // ✅ FIX: isClockedIn check NAHI karo yahan
-                // Critical event (location off/permission revoked) isClockedIn=false likh deta tha
-                // aur timer khud band ho jaata tha jabke user ne manually clockout nahi kiya tha.
-                // Timer sirf 2 jagah band hoga: (1) stopAllLoops() — jo sirf actual clockout/destroy pe chal
-                // aur (2) isDestroyed=true — service destroy hone pe
-                // isFrozen bhi check nahi karein — frozen pe bhi time dikhana chahiye
 
                 workingSeconds++
                 val hours   = workingSeconds / 3600
@@ -2702,7 +3180,7 @@ class LocationMonitorService : Service() {
 
     private fun updateWorkingNotification(timeStr: String) {
         val pi = PendingIntent.getActivity(
-            this, 1,  // requestCode 1 — NOTIFICATION_ID=1001 se alag
+            this, 1,
             packageManager.getLaunchIntentForPackage(packageName),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
@@ -2711,7 +3189,7 @@ class LocationMonitorService : Service() {
             .setContentText("Time: $timeStr")
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentIntent(pi)
-            .setOngoing(true)   // Swipe se dismiss nahi hogi
+            .setOngoing(true)
             .setSilent(true)
             .build()
         try {
@@ -2888,5 +3366,159 @@ class NativeDBHelper(context: Context) :
             "UPDATE location_tracking SET posted = 1 WHERE locationtracking_id IN ($placeholders)",
             ids.toTypedArray()
         )
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MidnightClockoutReceiver — fires at 23:58, works even when app is killed
+// ─────────────────────────────────────────────────────────────────────────────
+
+class MidnightClockoutReceiver : BroadcastReceiver() {
+
+    companion object {
+        const val ACTION_MIDNIGHT_CLOCKOUT = "com.metaxperts.order_booking_app.MIDNIGHT_CLOCKOUT"
+
+        fun schedule(context: Context) {
+            val prefs     = context.getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+            val clockedIn = prefs.getBoolean("flutter.isClockedIn", false)
+            val isFrozen  = prefs.getBoolean("flutter.is_timer_frozen", false)
+            if (!clockedIn || isFrozen) return
+
+            val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+
+            val intent = Intent(context, MidnightClockoutReceiver::class.java).apply {
+                action = ACTION_MIDNIGHT_CLOCKOUT
+            }
+            val pi = PendingIntent.getBroadcast(
+                context, 2358,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val now    = java.util.Calendar.getInstance()
+            val target = java.util.Calendar.getInstance().apply {
+                set(java.util.Calendar.HOUR_OF_DAY, 23)
+                set(java.util.Calendar.MINUTE, 58)
+                set(java.util.Calendar.SECOND, 0)
+                set(java.util.Calendar.MILLISECOND, 0)
+            }
+            if (now.after(target)) target.add(java.util.Calendar.DAY_OF_MONTH, 1)
+
+            try {
+                when {
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && am.canScheduleExactAlarms() ->
+                        am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, target.timeInMillis, pi)
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ->
+                        am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, target.timeInMillis, pi)
+                    else ->
+                        am.set(AlarmManager.RTC_WAKEUP, target.timeInMillis, pi)
+                }
+                android.util.Log.d("MidnightClockout", "✅ Midnight alarm scheduled for ${target.time}")
+            } catch (e: Exception) {
+                android.util.Log.d("MidnightClockout", "⚠️ Alarm schedule failed: ${e.message}")
+            }
+        }
+
+        fun cancel(context: Context) {
+            try {
+                val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+                val intent = Intent(context, MidnightClockoutReceiver::class.java).apply {
+                    action = ACTION_MIDNIGHT_CLOCKOUT
+                }
+                val pi = PendingIntent.getBroadcast(
+                    context, 2358,
+                    intent,
+                    PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE
+                )
+                pi?.let { am.cancel(it) }
+                android.util.Log.d("MidnightClockout", "✅ Midnight alarm cancelled")
+            } catch (e: Exception) {
+                android.util.Log.d("MidnightClockout", "⚠️ Alarm cancel failed: ${e.message}")
+            }
+        }
+    }
+
+    override fun onReceive(context: Context, intent: Intent?) {
+        if (intent?.action != ACTION_MIDNIGHT_CLOCKOUT) return
+
+        val prefs     = context.getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+        val clockedIn = prefs.getBoolean("flutter.isClockedIn", false)
+        val isFrozen  = prefs.getBoolean("flutter.is_timer_frozen", false)
+
+        android.util.Log.d("MidnightClockout", "⏰ Midnight alarm fired — clockedIn=$clockedIn frozen=$isFrozen")
+
+        if (!clockedIn || isFrozen) return
+
+        val now       = java.util.Date()
+        val timestamp = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault()).format(now)
+        val reason    = "System ClockOut - Midnight Time"
+
+        prefs.edit()
+            .putBoolean("flutter.has_critical_event_pending", true)
+            .putBoolean("has_critical_event_pending", true)
+            .putString("flutter.critical_event_reason", reason)
+            .putString("critical_event_reason", reason)
+            .putString("flutter.critical_event_timestamp", timestamp)
+            .putBoolean("flutter.is_timer_frozen", true)
+            .putBoolean("flutter.isClockedIn", false)
+            .putBoolean("isClockedIn", false)
+            .putString("flutter.fastClockOutTime", timestamp)
+            .putFloat("flutter.fastClockOutDistance", 0f)
+            .putString("flutter.fastClockOutReason", reason)
+            .putBoolean("flutter.hasFastClockOutData", true)
+            .putBoolean("flutter.clockOutPending", true)
+            .commit()
+
+        android.util.Log.d("MidnightClockout", "✅ Midnight clockout saved to prefs — user clocked out at $timestamp")
+
+        try {
+            context.stopService(Intent(context, LocationMonitorService::class.java))
+        } catch (e: Exception) {
+            android.util.Log.d("MidnightClockout", "⚠️ stopService: ${e.message}")
+        }
+
+        showMidnightNotification(context, timestamp)
+    }
+
+    private fun showMidnightNotification(context: Context, time: String) {
+        try {
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                nm.createNotificationChannel(
+                    NotificationChannel(
+                        "urgent_auto_clockout_channel",
+                        "URGENT Auto Clockout",
+                        NotificationManager.IMPORTANCE_HIGH
+                    ).apply {
+                        enableVibration(true)
+                        vibrationPattern = longArrayOf(0, 1000, 500, 1000)
+                        enableLights(true)
+                        lightColor = android.graphics.Color.RED
+                    }
+                )
+            }
+            val launchIntent = context.packageManager
+                .getLaunchIntentForPackage(context.packageName)?.apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                }
+            val pi = PendingIntent.getActivity(
+                context, 0,
+                launchIntent,
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            val n = NotificationCompat.Builder(context, "urgent_auto_clockout_channel")
+                .setContentTitle("⏰ Auto Clock-Out at 11:58 PM")
+                .setContentText("You were automatically clocked out. Open app to sync.")
+                .setSmallIcon(R.mipmap.ic_launcher)
+                .setPriority(NotificationCompat.PRIORITY_MAX)
+                .setCategory(NotificationCompat.CATEGORY_ALARM)
+                .setAutoCancel(true)
+                .setContentIntent(pi)
+                .setVibrate(longArrayOf(0, 1000, 500, 1000))
+                .build()
+            nm.notify(9997, n)
+        } catch (e: Exception) {
+            android.util.Log.d("MidnightClockout", "⚠️ Notification failed: ${e.message}")
+        }
     }
 }

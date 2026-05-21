@@ -1,3 +1,5 @@
+
+
 package com.metaxperts.order_booking_app
 
 import android.content.Context
@@ -21,10 +23,20 @@ class WorkManagerBulkPoster(
             val isFrozen = prefs.getBoolean("flutter.is_timer_frozen", false)
 
             if (isClockedIn && !isFrozen) {
+                // ✅ FIX: Agar LocationMonitorService chal rahi hai to WorkManager sync skip karo.
+                // Service khud 30s heartbeat mein syncUnpostedRows() call karti hai.
+                // Dono milke double posting karte the jab app kill hoti thi aur restart hoti thi.
+                // WorkManager sirf tab sync kare jab service band ho (fallback mode).
+                if (LocationMonitorService.isRunning) {
+                    android.util.Log.d("WorkManager", "⏭️ Service is running — skipping WorkManager sync (double posting prevention)")
+                    return Result.success()
+                }
+
                 val dbHelper = NativeDBHelper(applicationContext)
                 val unposted = dbHelper.getUnpostedRows()
 
                 if (unposted.isNotEmpty()) {
+                    android.util.Log.d("WorkManager", "📤 Service NOT running — WorkManager fallback syncing ${unposted.size} rows")
                     syncToServer(dbHelper, unposted)
                 }
             }
