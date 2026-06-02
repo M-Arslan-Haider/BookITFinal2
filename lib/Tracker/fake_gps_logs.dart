@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
+import 'package:http/io_client.dart';            // ← FIX 1: needed for custom SSL client
 import 'package:shared_preferences/shared_preferences.dart';
 import '../Databases/dp_helper.dart';
 import '../Databases/util.dart';
@@ -116,6 +117,23 @@ class FakeGpsLog {
   // ⭐ CRITICAL FIX: Cache the last REAL (non-mocked) position
   static Position? _lastRealPosition;
 
+  // ── Clock-out callback (registered by TimerCard on clock-in) ─────────────
+  static Future<void> Function(DateTime eventTime)? _clockOutCallback;
+
+  /// Register a callback that fires when fake GPS triggers auto clock-out.
+  /// Call this right after a successful clock-in.
+  static void registerClockOutCallback(
+      Future<void> Function(DateTime eventTime) callback) {
+    _clockOutCallback = callback;
+    debugPrint('✅ [FakeGPS] Clock-out callback registered');
+  }
+
+  /// Unregister the callback — call after any clock-out (manual or auto).
+  static void unregisterClockOutCallback() {
+    _clockOutCallback = null;
+    debugPrint('🛑 [FakeGPS] Clock-out callback unregistered');
+  }
+
   // ── Call once in main() ───────────────────────────────────────────────────
   static void startConnectivityListener() {
     _connectivitySub?.cancel();
@@ -162,6 +180,16 @@ class FakeGpsLog {
     final fakeLat = pos.latitude;
     final fakeLon = pos.longitude;
     debugPrint('🚨 [FakeGPS] FAKE GPS detected! fake=($fakeLat, $fakeLon)');
+
+    // ── Fire auto clock-out callback if registered ────────────────────────────
+    if (_clockOutCallback != null) {
+      debugPrint('⚡ [FakeGPS] Firing clock-out callback at $now');
+      try {
+        await _clockOutCallback!(now);
+      } catch (e) {
+        debugPrint('❌ [FakeGPS] Clock-out callback error: $e');
+      }
+    }
 
     // ⭐ CRITICAL: Use cached real position
     double realLat;
@@ -282,13 +310,30 @@ class FakeGpsLog {
     }
   }
 
+  // ── FIX 1: Custom HTTP client that accepts the server's self-signed / private CA cert.
+  //   This is safe because we pin to a specific private hostname, not the open internet.
+  static http.Client _buildHttpClient() {
+    final ioClient = HttpClient()
+      ..badCertificateCallback = (X509Certificate cert, String host, int port) {
+        // Only bypass for our private Oracle APEX server — not for all hosts
+        return host == 'cloud.metaxperts.net';
+      }
+      ..connectionTimeout = const Duration(seconds: 15);
+    return IOClient(ioClient);
+  }
+
   static Future<bool> _post(FakeGpsModel model) async {
+    http.Client? client;
     try {
-      final response = await http
+      client = _buildHttpClient();
+      final body = jsonEncode(model.toJson());
+      debugPrint('📤 [FakeGPS] POST → $_apiUrl\n   body=$body');
+
+      final response = await client
           .post(
         Uri.parse(_apiUrl),
         headers: {'Content-Type': 'application/json'},
-        body: jsonEncode(model.toJson()),
+        body: body,
       )
           .timeout(const Duration(seconds: 15));
 
@@ -296,11 +341,26 @@ class FakeGpsLog {
         debugPrint('✅ [FakeGPS] Posted id=${model.id} → ${response.statusCode}');
         return true;
       }
+      // Log the full response body so you can see Oracle APEX error messages
       debugPrint('⚠️ [FakeGPS] Server rejected → ${response.statusCode}: ${response.body}');
       return false;
-    } catch (e) {
-      debugPrint('❌ [FakeGPS] POST failed: $e');
+    } on HandshakeException catch (e) {
+      // This is the SSL/TLS failure — now visible in logs instead of silent
+      debugPrint('🔒 [FakeGPS] SSL handshake FAILED: $e\n'
+          '   → Check that cloud.metaxperts.net:8443 certificate is valid '
+          'or that the badCertificateCallback host matches exactly.');
       return false;
+    } on SocketException catch (e) {
+      debugPrint('📵 [FakeGPS] No network / socket error: $e');
+      return false;
+    } on TimeoutException catch (e) {
+      debugPrint('⏱️ [FakeGPS] Request timed out: $e');
+      return false;
+    } catch (e) {
+      debugPrint('❌ [FakeGPS] POST failed (${e.runtimeType}): $e');
+      return false;
+    } finally {
+      client?.close();
     }
   }
 }

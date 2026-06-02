@@ -67,7 +67,6 @@ class _NSMShopDetailPageState extends State<NSMShopDetailPage> {
     await Config.fetchLatestConfig();
     final url =
         "${Config.getApiUrlServerIP}${Config.getApiUrlERPCompanyName}${Config.getApiUrlNsmShop}$user_id";
-        // 'https://cloud.metaxperts.net:8443/erp/test1/nsmshops/get/$user_id';
     final response = await http.get(Uri.parse(url));
 
     if (response.statusCode == 200) {

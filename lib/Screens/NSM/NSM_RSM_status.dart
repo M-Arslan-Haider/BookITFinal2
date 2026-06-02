@@ -70,7 +70,6 @@ class NSM_RSM_StatusState extends State<NSM_RSM_Status> {
     await Config.fetchLatestConfig();
     final url =
         "${Config.getApiUrlServerIP}${Config.getApiUrlERPCompanyName}${Config.getApiUrlNsmRsmStatus}$user_id";
-        // 'https://cloud.metaxperts.net:8443/erp/test1/nsmrsmstatus/get/$user_id';
     debugPrint('Fetching data from URL: $url');
     final response = await http.get(Uri.parse(url));
 

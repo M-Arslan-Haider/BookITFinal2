@@ -1,4 +1,5 @@
 //
+//
 // import 'dart:async';
 // import 'dart:io';
 // import 'dart:io' show Directory, InternetAddress, Platform, SocketException;
@@ -487,10 +488,17 @@
 // // onStart — runs in its OWN isolate
 // @pragma('vm:entry-point')
 // void onStart(ServiceInstance service) async {
+//   // ✅ FIX: Call setAsForegroundService() IMMEDIATELY — before ANY await.
+//   // Android kills the app if startForeground() is not called within 5 seconds
+//   // of startForegroundService(). Any async work before this call risks that deadline.
+//   if (service is AndroidServiceInstance) {
+//     service.setAsForegroundService();
+//   }
+//
+//   // Now it is safe to do async initialization
 //   DartPluginRegistrant.ensureInitialized();
 //
 //   if (service is AndroidServiceInstance) {
-//     service.setAsForegroundService();
 //     service.on('setAsForeground').listen((_) => service.setAsForegroundService());
 //     service.on('setAsBackground').listen((_) => service.setAsBackgroundService());
 //   }
@@ -1471,6 +1479,15 @@ void onStart(ServiceInstance service) async {
       final stillClockedIn = prefs.getBool('isClockedIn') ?? false;
       if (!stillClockedIn) {
         debugPrint('⏸️ [BG] Not clocked in — skipping tick');
+        return;
+      }
+
+      // ✅ FIX: Agar Kotlin service chal rahi hai toh Flutter loop skip kare.
+      // Kotlin LocationMonitorService khud data save aur post karti hai.
+      // Jab Kotlin service kill ho jaye tab Flutter automatically fallback karta hai.
+      final kotlinIsMaster = prefs.getBool('flutter.kotlin_service_is_master') ?? false;
+      if (kotlinIsMaster) {
+        debugPrint('⏭️ [BG] Kotlin is master — Flutter tick skipped (no double posting)');
         return;
       }
 
