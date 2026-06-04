@@ -1,8 +1,8 @@
-
-
 package com.metaxperts.order_booking_app
 
 import android.content.Context
+import android.content.Intent
+import android.os.Build
 import androidx.work.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -18,30 +18,53 @@ class WorkManagerBulkPoster(
 
     override fun doWork(): Result {
         return try {
-            val prefs = applicationContext.getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+            val prefs       = applicationContext.getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
             val isClockedIn = prefs.getBoolean("flutter.isClockedIn", false)
-            val isFrozen = prefs.getBoolean("flutter.is_timer_frozen", false)
+            val isFrozen    = prefs.getBoolean("flutter.is_timer_frozen", false)
 
             if (isClockedIn && !isFrozen) {
-                // ✅ FIX: Agar LocationMonitorService chal rahi hai to WorkManager sync skip karo.
-                // Service khud 30s heartbeat mein syncUnpostedRows() call karti hai.
-                // Dono milke double posting karte the jab app kill hoti thi aur restart hoti thi.
-                // WorkManager sirf tab sync kare jab service band ho (fallback mode).
-                if (LocationMonitorService.isRunning) {
+
+                // ✅ FIX: Agar service nahi chal rahi to WorkManager restart kare
+                if (!LocationMonitorService.isRunning) {
+                    android.util.Log.d("WorkManager", "🔄 Service NOT running — WorkManager attempting restart")
+                    val userId = prefs.getString("flutter.userId", "") ?: ""
+
+                    if (userId.isNotEmpty()) {
+                        try {
+                            val serviceIntent = Intent(applicationContext, LocationMonitorService::class.java).apply {
+                                putExtra("extra_user_id",      userId)
+                                putExtra("extra_booker_name",  prefs.getString("flutter.userName", "") ?: "")
+                                putExtra("extra_designation",  prefs.getString("flutter.userDesignation", "") ?: "")
+                                putExtra("extra_company_code", prefs.getString("flutter.companyCode", "") ?: "")
+                            }
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                applicationContext.startForegroundService(serviceIntent)
+                            } else {
+                                applicationContext.startService(serviceIntent)
+                            }
+                            android.util.Log.d("WorkManager", "✅ Service restart triggered for userId=$userId")
+                        } catch (e: Exception) {
+                            android.util.Log.e("WorkManager", "❌ Service restart failed: ${e.message}")
+                        }
+                    } else {
+                        android.util.Log.w("WorkManager", "⚠️ userId empty — cannot restart service")
+                    }
+
+                    // Also sync unposted rows as fallback while service is restarting
+                    val dbHelper = NativeDBHelper(applicationContext)
+                    val unposted = dbHelper.getUnpostedRows()
+                    if (unposted.isNotEmpty()) {
+                        android.util.Log.d("WorkManager", "📤 WorkManager fallback syncing ${unposted.size} rows")
+                        syncToServer(dbHelper, unposted)
+                    }
+                } else {
+                    // Service is running — it handles its own sync via heartbeat
                     android.util.Log.d("WorkManager", "⏭️ Service is running — skipping WorkManager sync (double posting prevention)")
-                    return Result.success()
-                }
-
-                val dbHelper = NativeDBHelper(applicationContext)
-                val unposted = dbHelper.getUnpostedRows()
-
-                if (unposted.isNotEmpty()) {
-                    android.util.Log.d("WorkManager", "📤 Service NOT running — WorkManager fallback syncing ${unposted.size} rows")
-                    syncToServer(dbHelper, unposted)
                 }
             }
             Result.success()
         } catch (e: Exception) {
+            android.util.Log.e("WorkManager", "❌ WorkManager doWork error: ${e.message}")
             Result.retry()
         }
     }
@@ -55,24 +78,24 @@ class WorkManagerBulkPoster(
                 records.put(JSONObject().apply {
                     put("locationtracking_date", row["locationtracking_date"] ?: "")
                     put("locationtracking_time", row["locationtracking_time"] ?: "")
-                    put("user_id", row["user_id"] ?: "")
+                    put("user_id",      row["user_id"]      ?: "")
                     put("company_code", row["company_code"] ?: "")
-                    put("lat_in", (row["lat_in"] ?: "0").toDoubleOrNull() ?: 0.0)
-                    put("lng_in", (row["lng_in"] ?: "0").toDoubleOrNull() ?: 0.0)
-                    put("booker_name", row["booker_name"] ?: "")
-                    put("designation", row["designation"] ?: "")
+                    put("lat_in",       (row["lat_in"]  ?: "0").toDoubleOrNull() ?: 0.0)
+                    put("lng_in",       (row["lng_in"]  ?: "0").toDoubleOrNull() ?: 0.0)
+                    put("booker_name",  row["booker_name"]  ?: "")
+                    put("designation",  row["designation"]  ?: "")
                 })
             }
 
             val body = JSONObject().put("records", records).toString()
 
-            val url = URL(BULK_API)
+            val url  = URL(BULK_API)
             val conn = url.openConnection() as HttpURLConnection
             conn.apply {
                 requestMethod = "POST"
                 connectTimeout = 15000
-                readTimeout = 30000
-                doOutput = true
+                readTimeout    = 30000
+                doOutput       = true
                 setRequestProperty("Content-Type", "application/json")
             }
 

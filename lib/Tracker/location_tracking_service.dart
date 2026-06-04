@@ -1,8 +1,8 @@
-
 import 'dart:async';
 import 'dart:convert';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
@@ -73,8 +73,10 @@ const _kGpsPolicyApi =
     'https://cloud.metaxperts.net:8443/erp/valor_trading/gpstracking/get/';
 
 // ✅ KEY: Kotlin service "is master" flag key — same key Kotlin bhi set karta hai
-// Jab Kotlin service chal rahi ho to Flutter GPS save skip karta hai (double posting rokne ke liye)
 const _kKotlinServiceMasterKey = 'flutter.kotlin_service_is_master';
+
+// ✅ OEM Setup Channel
+const _oemSettingsChannel = MethodChannel('com.metaxperts.order_booking_app/oem_settings');
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -276,15 +278,27 @@ class LocationTrackingService {
 
   // ── Kotlin service master check ───────────────────────────────────────────
 
-  /// ✅ FIX: Check karo ke Kotlin LocationMonitorService chal rahi hai ya nahi.
-  /// Agar chal rahi hai to Flutter GPS save skip karo — Kotlin khud save karta hai.
-  /// Is se app kill/restart ke baad double posting completely band hoti hai.
-  ///
-  /// Kotlin service onStartCommand() mein 'flutter.kotlin_service_is_master' = true set karta hai
-  /// aur onDestroy() mein false set karta hai.
   Future<bool> _isKotlinServiceMaster() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getBool(_kKotlinServiceMasterKey) ?? false;
+  }
+
+  // ── OEM Setup Check ────────────────────────────────────────────────────────
+
+  static Future<String> getOemBrand() async {
+    try {
+      final brand = await _oemSettingsChannel.invokeMethod<String>('getOemBrand');
+      return brand ?? '';
+    } catch (e) {
+      debugPrint('⚠️ [OEM] getOemBrand failed: $e');
+      return '';
+    }
+  }
+
+  static bool needsOemSetup(String brand) {
+    final oemBrands = ['xiaomi', 'oppo', 'vivo', 'realme', 'huawei',
+      'honor', 'samsung', 'oneplus', 'tecno', 'infinix', 'itel'];
+    return oemBrands.any((b) => brand.contains(b));
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -395,19 +409,14 @@ class LocationTrackingService {
     debugPrint('⏱️ [Timer] Next tick in ${safeDelay}ms (target: ${nextBoundary.toIso8601String()})');
 
     _locationTimer = Timer(Duration(milliseconds: safeDelay), () async {
-      // ✅ FIX: Kotlin service master hai to Flutter GPS save skip karo
-      // App open + background dono mein Kotlin service chal rahi hoti hai
-      // Sirf jab service bilkul nahi chal rahi (e.g. permission issue) tab Flutter save kare
       final kotlinIsMaster = await _isKotlinServiceMaster();
       if (kotlinIsMaster) {
         debugPrint(
             '⏭️ [Timer] Kotlin service is master — skipping Flutter GPS save (double posting prevention)');
       } else {
-        // Kotlin service nahi chal rahi — Flutter fallback mode mein save kare
         debugPrint('🔄 [Timer] Kotlin service NOT master — Flutter saving location');
         await _saveCurrentLocation();
       }
-      // Next tick schedule karo regardless
       _scheduleNextTick(intervalMs);
     });
   }
@@ -474,10 +483,39 @@ class LocationTrackingService {
 
   Future<void> resumeIfNeeded() async {
     await initialize();
-    final prefs       = await SharedPreferences.getInstance();
+    final prefs        = await SharedPreferences.getInstance();
     final shouldResume = prefs.getBool('isLocationTracking') ?? false;
     if (shouldResume && !_isTracking) await startTracking();
     await _repo.postDataFromDatabaseToAPI();
+  }
+
+  // ✅ FIX: Calculate working elapsed time directly from clockInTime stored in prefs.
+  // The Flutter UI timer should use this instead of relying on a Kotlin service broadcast.
+  // When the service dies and restarts (app kill), this ensures the timer always shows
+  // the correct accumulated time — no dependency on service being continuously alive.
+  //
+  // Usage in your UI widget:
+  //   final elapsed = await LocationTrackingService().getElapsedFromClockIn();
+  //   if (elapsed != null) _displayTimer(elapsed);
+  static Future<Duration?> getElapsedFromClockIn() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final isClockedIn = prefs.getBool('isClockedIn') ?? false;
+      if (!isClockedIn) return null;
+
+      final clockInStr = prefs.getString('clockInTime') ?? '';
+      if (clockInStr.isEmpty) return null;
+
+      final clockInTime = DateTime.tryParse(clockInStr);
+      if (clockInTime == null) return null;
+
+      final elapsed = DateTime.now().difference(clockInTime);
+      if (elapsed.isNegative) return Duration.zero;
+      return elapsed;
+    } catch (e) {
+      debugPrint('⚠️ [Timer] getElapsedFromClockIn error: $e');
+      return null;
+    }
   }
 
   Future<void> syncNow() async {
