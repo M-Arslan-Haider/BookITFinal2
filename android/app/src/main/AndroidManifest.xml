@@ -1,179 +1,20 @@
-
-<!--<manifest xmlns:android="http://schemas.android.com/apk/res/android"-->
-<!--    xmlns:tools="http://schemas.android.com/tools">-->
-
-<!--    <uses-permission android:name="android.permission.INTERNET" />-->
-<!--    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />-->
-<!--    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />-->
-<!--    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>-->
-<!--    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />-->
-<!--    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />-->
-<!--    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />-->
-<!--    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />-->
-<!--    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />-->
-<!--    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"-->
-<!--        android:maxSdkVersion="29" />-->
-<!--    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />-->
-<!--    <uses-permission android:name="android.permission.CAMERA" />-->
-<!--    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />-->
-<!--    <uses-permission android:name="android.permission.RECORD_AUDIO" />-->
-<!--    <uses-permission android:name="android.permission.READ_PHONE_STATE" />-->
-<!--    <uses-permission android:name="android.permission.READ_CONTACTS" />-->
-<!--    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />-->
-<!--    <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />-->
-<!--    <uses-permission android:name="android.permission.WAKE_LOCK" />-->
-<!--    <uses-permission android:name="android.permission.USE_BIOMETRIC"/>-->
-<!--    <uses-permission android:name="android.permission.USE_FINGERPRINT"/>-->
-<!--    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />-->
-<!--    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />-->
-<!--    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />-->
-<!--    <uses-permission android:name="android.permission.VIBRATE" />-->
-
-<!--    <application-->
-<!--        android:label="BookIT"-->
-<!--        android:name="${applicationName}"-->
-<!--        android:icon="@mipmap/ic_launcher"-->
-<!--        android:enableOnBackInvokedCallback="true"-->
-<!--        android:networkSecurityConfig="@xml/network_security_config">-->
-
-<!--        <meta-data-->
-<!--            android:name="io.flutter.embedding.android.EnableImpeller"-->
-<!--            android:value="false" />-->
-
-<!--        <provider-->
-<!--            android:name="androidx.core.content.FileProvider"-->
-<!--            android:authorities="${applicationId}.fileprovider"-->
-<!--            android:exported="false"-->
-<!--            android:grantUriPermissions="true">-->
-<!--            <meta-data-->
-<!--                android:name="android.support.FILE_PROVIDER_PATHS"-->
-<!--                android:resource="@xml/file_paths" />-->
-<!--        </provider>-->
-
-<!--        &lt;!&ndash; Location Monitor Service — GPS tracking &ndash;&gt;-->
-<!--        <service-->
-<!--            android:name=".LocationMonitorService"-->
-<!--            android:enabled="true"-->
-<!--            android:exported="false"-->
-<!--            android:foregroundServiceType="location"-->
-<!--            android:stopWithTask="false" />-->
-
-<!--        <receiver-->
-<!--            android:name=".BootCompletedReceiver"-->
-<!--            android:enabled="true"-->
-<!--            android:exported="true">-->
-<!--            <intent-filter>-->
-<!--                <action android:name="android.intent.action.BOOT_COMPLETED" />-->
-<!--                <action android:name="android.intent.action.QUICKBOOT_POWERON" />-->
-<!--                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />-->
-<!--                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />-->
-<!--            </intent-filter>-->
-<!--        </receiver>-->
-
-<!--        <meta-data-->
-<!--            android:name="com.google.android.geo.API_KEY"-->
-<!--            android:value="AIzaSyB75e8drxN6oXb4U2V2c56yccRrEjmDmHo" />-->
-
-<!--        <meta-data-->
-<!--            android:name="com.google.android.gms.version"-->
-<!--            android:value="@integer/google_play_services_version" />-->
-
-<!--        <activity-->
-<!--            android:name=".MainActivity"-->
-<!--            android:exported="true"-->
-<!--            android:launchMode="singleTop"-->
-<!--            android:taskAffinity=""-->
-<!--            android:theme="@style/LaunchTheme"-->
-<!--            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"-->
-<!--            android:hardwareAccelerated="true"-->
-<!--            android:windowSoftInputMode="adjustResize"-->
-<!--            android:showWhenLocked="true"-->
-<!--            android:turnScreenOn="true">-->
-<!--            <meta-data-->
-<!--                android:name="io.flutter.embedding.android.NormalTheme"-->
-<!--                android:resource="@style/NormalTheme" />-->
-<!--            <intent-filter>-->
-<!--                <action android:name="android.intent.action.MAIN" />-->
-<!--                <category android:name="android.intent.category.LAUNCHER" />-->
-<!--            </intent-filter>-->
-<!--        </activity>-->
-
-<!--        <service-->
-<!--            android:name="id.flutter.flutter_background_service.BackgroundService"-->
-<!--            android:foregroundServiceType="location" />-->
-
-<!--        <meta-data-->
-<!--            android:name="flutterEmbedding"-->
-<!--            android:value="2" />-->
-
-<!--        <receiver-->
-<!--            android:name=".SyncAlarmReceiver"-->
-<!--            android:enabled="true"-->
-<!--            android:exported="false" />-->
-
-<!--        <receiver android:name=".ClockoutAlarmReceiver" android:enabled="true" android:exported="false" />-->
-
-<!--        <receiver-->
-<!--            android:name=".ServiceRestartReceiver"-->
-<!--            android:enabled="true"-->
-<!--            android:exported="false">-->
-<!--            <intent-filter>-->
-<!--                <action android:name="com.metaxperts.order_booking_app.RESTART_SERVICE" />-->
-<!--            </intent-filter>-->
-<!--        </receiver>-->
-
-<!--        <receiver-->
-<!--            android:name=".MidnightClockoutReceiver"-->
-<!--            android:exported="false">-->
-<!--            <intent-filter>-->
-<!--                <action android:name="com.metaxperts.order_booking_app.MIDNIGHT_CLOCKOUT"/>-->
-<!--            </intent-filter>-->
-<!--        </receiver>-->
-
-<!--        <receiver-->
-<!--            android:name=".BulkPostAlarmReceiver"-->
-<!--            android:enabled="true"-->
-<!--            android:exported="false" />-->
-
-<!--        <provider-->
-<!--            android:name="androidx.startup.InitializationProvider"-->
-<!--            android:authorities="${applicationId}.androidx-startup"-->
-<!--            android:exported="false"-->
-<!--            tools:node="merge">-->
-<!--            <meta-data-->
-<!--                android:name="androidx.work.WorkManagerInitializer"-->
-<!--                android:value="androidx.startup"-->
-<!--                tools:replace="android:value" />-->
-<!--        </provider>-->
-
-<!--        <service android:name=".ClockoutRingtoneService" android:enabled="true"-->
-<!--            android:exported="false" android:foregroundServiceType="mediaPlayback"-->
-<!--            android:stopWithTask="false" />-->
-
-<!--    </application>-->
-
-<!--    <queries>-->
-<!--        <intent>-->
-<!--            <action android:name="android.intent.action.PROCESS_TEXT" />-->
-<!--            <data android:mimeType="text/plain" />-->
-<!--        </intent>-->
-<!--    </queries>-->
-
-<!--</manifest>-->
-
-
+<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- ═══════════════════════════════════════════════════════════════════════
+         Permissions
+    ══════════════════════════════════════════════════════════════════════════ -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
-    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="29" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
@@ -183,13 +24,12 @@
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.READ_CONTACTS" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <uses-permission android:name="android.permission.USE_BIOMETRIC"/>
-    <uses-permission android:name="android.permission.USE_FINGERPRINT"/>
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <uses-permission android:name="android.permission.USE_FINGERPRINT" />
+    <!-- SCHEDULE_EXACT_ALARM: only for MidnightClockoutReceiver (10 PM alarm) -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.VIBRATE" />
 
     <application
@@ -203,6 +43,7 @@
             android:name="io.flutter.embedding.android.EnableImpeller"
             android:value="false" />
 
+        <!-- FileProvider -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -213,7 +54,12 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
-        <!-- Location Monitor Service — GPS tracking -->
+        <!-- ═══════════════════════════════════════════════════════════════════
+             LocationMonitorService
+             - foregroundServiceType="location" required for background GPS
+             - stopWithTask="false" so service survives app swipe-away
+             - START_STICKY ensures OS restarts it without AlarmManager
+        ════════════════════════════════════════════════════════════════════ -->
         <service
             android:name=".LocationMonitorService"
             android:enabled="true"
@@ -221,6 +67,10 @@
             android:foregroundServiceType="location"
             android:stopWithTask="false" />
 
+        <!-- ═══════════════════════════════════════════════════════════════════
+             BootCompletedReceiver
+             - directBootAware="true" fires on locked boot (Xiaomi, OnePlus)
+        ════════════════════════════════════════════════════════════════════ -->
         <receiver
             android:name=".BootCompletedReceiver"
             android:enabled="true"
@@ -235,14 +85,55 @@
             </intent-filter>
         </receiver>
 
+        <!-- ═══════════════════════════════════════════════════════════════════
+             MidnightClockoutReceiver — exact 10 PM alarm (AlarmManager only)
+        ════════════════════════════════════════════════════════════════════ -->
+        <receiver
+            android:name=".MidnightClockoutReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.metaxperts.order_booking_app.MIDNIGHT_CLOCKOUT" />
+            </intent-filter>
+        </receiver>
+
+        <!-- ═══════════════════════════════════════════════════════════════════
+             ServiceRestartReceiver — AlarmManager watchdog fired from onTaskRemoved
+             Used as belt-and-suspenders restart mechanism for aggressive OEMs
+        ════════════════════════════════════════════════════════════════════ -->
+        <receiver
+            android:name=".ServiceRestartReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.metaxperts.order_booking_app.RESTART_SERVICE" />
+            </intent-filter>
+        </receiver>
+
+        <!-- ═══════════════════════════════════════════════════════════════════
+             ClockoutRingtoneService — 8 PM ringtone reminder service
+             (Commented in ClockoutAlarmReceiver.kt but kept for completeness)
+        ════════════════════════════════════════════════════════════════════ -->
+        <service
+            android:name=".ClockoutRingtoneService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback"
+            android:stopWithTask="false" />
+
+        <!-- ═══════════════════════════════════════════════════════════════════
+             Google Maps API Key
+        ════════════════════════════════════════════════════════════════════ -->
         <meta-data
             android:name="com.google.android.geo.API_KEY"
             android:value="AIzaSyB75e8drxN6oXb4U2V2c56yccRrEjmDmHo" />
-
         <meta-data
             android:name="com.google.android.gms.version"
             android:value="@integer/google_play_services_version" />
 
+        <!-- ═══════════════════════════════════════════════════════════════════
+             MainActivity
+             - showWhenLocked + turnScreenOn to wake screen on notifications
+        ════════════════════════════════════════════════════════════════════ -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -263,6 +154,7 @@
             </intent-filter>
         </activity>
 
+        <!-- Flutter background service (kept as-is) -->
         <service
             android:name="id.flutter.flutter_background_service.BackgroundService"
             android:foregroundServiceType="location" />
@@ -271,35 +163,10 @@
             android:name="flutterEmbedding"
             android:value="2" />
 
-        <receiver
-            android:name=".SyncAlarmReceiver"
-            android:enabled="true"
-            android:exported="false" />
-
-        <receiver android:name=".ClockoutAlarmReceiver" android:enabled="true" android:exported="false" />
-
-        <receiver
-            android:name=".ServiceRestartReceiver"
-            android:enabled="true"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="com.metaxperts.order_booking_app.RESTART_SERVICE" />
-            </intent-filter>
-        </receiver>
-
-        <receiver
-            android:name=".MidnightClockoutReceiver"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="com.metaxperts.order_booking_app.MIDNIGHT_CLOCKOUT"/>
-            </intent-filter>
-        </receiver>
-
-        <receiver
-            android:name=".BulkPostAlarmReceiver"
-            android:enabled="true"
-            android:exported="false" />
-
+        <!-- ═══════════════════════════════════════════════════════════════════
+             WorkManager init — disables auto-init so we control it
+             Allows manual scheduling via LocationUploadWorker.schedule()
+        ════════════════════════════════════════════════════════════════════ -->
         <provider
             android:name="androidx.startup.InitializationProvider"
             android:authorities="${applicationId}.androidx-startup"
@@ -311,9 +178,13 @@
                 tools:replace="android:value" />
         </provider>
 
-        <service android:name=".ClockoutRingtoneService" android:enabled="true"
-            android:exported="false" android:foregroundServiceType="mediaPlayback"
-            android:stopWithTask="false" />
+        <!-- ═══════════════════════════════════════════════════════════════════
+             REMOVED / NOT INCLUDED components (per code comments):
+               ❌ SyncAlarmReceiver       — replaced by WorkManager
+               ❌ BulkPostAlarmReceiver   — replaced by WorkManager
+               ❌ ClockoutAlarmReceiver   — commented out in source
+               ⚠️  SyncAlarmReceiver.kt is fully commented out — no need to add
+        ════════════════════════════════════════════════════════════════════ -->
 
     </application>
 

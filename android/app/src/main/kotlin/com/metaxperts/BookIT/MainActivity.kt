@@ -1,5 +1,27 @@
 package com.metaxperts.order_booking_app
 
+// ═════════════════════════════════════════════════════════════════════════════
+// MainActivity — REDESIGNED
+//
+// Changes from old version:
+//   ❌ Removed: SyncAlarmReceiver.startAlarm/stopAlarm (replaced by WorkManager)
+//   ✅ Kept: location_monitor channel (start/stop service)
+//   ✅ Kept: auto_time channel
+//   ✅ Kept: oem_settings channel
+//   ✅ Kept: battery optimization request
+//   ✅ Kept: synchronous prefs commit before service start
+//
+// On "startMonitoring":
+//   1. Commit user identity to SharedPreferences (sync .commit())
+//   2. Start LocationMonitorService (foreground)
+//   3. Schedule LocationUploadWorker (WorkManager, 15 min periodic)
+//
+// On "stopMonitoring":
+//   1. Stop LocationMonitorService
+//   2. Cancel LocationUploadWorker
+//   3. Cancel MidnightClockoutReceiver alarm
+// ═════════════════════════════════════════════════════════════════════════════
+
 import android.content.ComponentName
 import android.content.Intent
 import android.net.Uri
@@ -15,10 +37,9 @@ import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterFragmentActivity(), ProviderInstaller.ProviderInstallListener {
 
-    private val LOCATION_CHANNEL   = "com.metaxperts.order_booking_app/location_monitor"
-    private val SYNC_ALARM_CHANNEL = "com.metaxperts.order_booking_app/sync_alarm"
-    private val AUTO_TIME_CHANNEL  = "com.metaxperts.order_booking_app/auto_time"
-    private val OEM_SETTINGS_CHANNEL = "com.metaxperts.order_booking_app/oem_settings"
+    private val LOCATION_CHANNEL    = "com.metaxperts.order_booking_app/location_monitor"
+    private val AUTO_TIME_CHANNEL   = "com.metaxperts.order_booking_app/auto_time"
+    private val OEM_SETTINGS_CHANNEL= "com.metaxperts.order_booking_app/oem_settings"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -26,37 +47,12 @@ class MainActivity : FlutterFragmentActivity(), ProviderInstaller.ProviderInstal
         requestBatteryOptimizationIfNeeded()
     }
 
-    override fun onResume() {
-        super.onResume()
-    }
-
-    override fun onPause() {
-        super.onPause()
-    }
-
-    private fun requestBatteryOptimizationIfNeeded() {
-        try {
-            val pm = getSystemService(POWER_SERVICE) as PowerManager
-            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
-                val intent = Intent(
-                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
-                ).apply {
-                    data = Uri.parse("package:$packageName")
-                }
-                startActivity(intent)
-            }
-        } catch (e: Exception) {
-            // ignore
-        }
-    }
-
-    // ✅ FIX: Synchronously commit user identity to SharedPreferences BEFORE starting service.
-    // Using .commit() (not .apply()) so the write is guaranteed on disk before service start.
-    // When Android restarts the service after an app kill, it reads these prefs on cold restart.
-    // If .apply() was used, a race condition could cause userId to be empty on first restart.
+    // ── Synchronously write user identity before starting service ─────────────
+    // Uses .commit() not .apply() to guarantee disk write before service reads prefs.
+    // Critical on OEM devices where cold restart reads prefs before apply() flushes.
     private fun saveUserIdentitySync(
-        userId: String,
-        bookerName: String,
+        userId:      String,
+        bookerName:  String,
         designation: String,
         companyCode: String
     ) {
@@ -67,41 +63,36 @@ class MainActivity : FlutterFragmentActivity(), ProviderInstaller.ProviderInstal
                 .putString("flutter.userName",        bookerName)
                 .putString("flutter.userDesignation", designation)
                 .putString("flutter.companyCode",     companyCode)
-                .commit() // synchronous — guarantees disk write before service start
-            android.util.Log.d("MainActivity", "✅ User identity committed to prefs (sync) — userId=$userId")
+                .commit()
+            android.util.Log.d("MainActivity", "✅ Identity committed (sync) — userId=$userId")
         } catch (e: Exception) {
             android.util.Log.e("MainActivity", "❌ saveUserIdentitySync failed: ${e.message}")
         }
     }
 
-    private fun isAutoTimeEnabled(): Boolean {
-        return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
-                Settings.Global.getInt(
-                    contentResolver,
-                    Settings.Global.AUTO_TIME,
-                    0
-                ) == 1
-            } else {
-                @Suppress("DEPRECATION")
-                Settings.System.getInt(
-                    contentResolver,
-                    Settings.System.AUTO_TIME,
-                    0
-                ) == 1
+    private fun requestBatteryOptimizationIfNeeded() {
+        try {
+            val pm = getSystemService(POWER_SERVICE) as PowerManager
+            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                    data = Uri.parse("package:$packageName")
+                })
             }
-        } catch (e: Exception) {
-            android.util.Log.e("MainActivity", "isAutoTimeEnabled error: ${e.message}")
-            false
-        }
+        } catch (_: Exception) {}
     }
 
-    private fun openDateTimeSettings() {
-        try {
-            startActivity(Intent(Settings.ACTION_DATE_SETTINGS))
-        } catch (e: Exception) {
-            startActivity(Intent(Settings.ACTION_SETTINGS))
+    private fun isAutoTimeEnabled(): Boolean = try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
+            Settings.Global.getInt(contentResolver, Settings.Global.AUTO_TIME, 0) == 1
+        } else {
+            @Suppress("DEPRECATION")
+            Settings.System.getInt(contentResolver, Settings.System.AUTO_TIME, 0) == 1
         }
+    } catch (_: Exception) { false }
+
+    private fun openDateTimeSettings() {
+        try { startActivity(Intent(Settings.ACTION_DATE_SETTINGS)) }
+        catch (_: Exception) { startActivity(Intent(Settings.ACTION_SETTINGS)) }
     }
 
     private fun openOemAutoStartSettings() {
@@ -124,23 +115,12 @@ class MainActivity : FlutterFragmentActivity(), ProviderInstaller.ProviderInstal
                 data = Uri.parse("package:$packageName")
             }
         )
-
         for (intent in intents) {
-            try {
-                startActivity(intent)
-                return
-            } catch (e: Exception) {
-                // continue to next intent
-            }
+            try { startActivity(intent); return } catch (_: Exception) {}
         }
     }
 
-    private fun getOemBrand(): String {
-        return Build.MANUFACTURER.lowercase()
-    }
-
     override fun onProviderInstalled() {}
-
     override fun onProviderInstallFailed(errorCode: Int, intent: Intent?) {
         GoogleApiAvailability.getInstance().showErrorNotification(this, errorCode)
     }
@@ -148,121 +128,77 @@ class MainActivity : FlutterFragmentActivity(), ProviderInstaller.ProviderInstal
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
-        // 1. Location monitor channel
-        MethodChannel(
-            flutterEngine.dartExecutor.binaryMessenger,
-            LOCATION_CHANNEL
-        ).setMethodCallHandler { call, result ->
-            when (call.method) {
-                "startMonitoring" -> {
-                    try {
-                        val userId      = call.argument<String>("userId")      ?: ""
-                        val bookerName  = call.argument<String>("bookerName")  ?: ""
-                        val designation = call.argument<String>("designation") ?: ""
-                        val companyCode = call.argument<String>("companyCode") ?: ""
+        // ── 1. Location Monitor Channel ───────────────────────────────────────
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, LOCATION_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "startMonitoring" -> {
+                        try {
+                            val userId      = call.argument<String>("userId")      ?: ""
+                            val bookerName  = call.argument<String>("bookerName")  ?: ""
+                            val designation = call.argument<String>("designation") ?: ""
+                            val companyCode = call.argument<String>("companyCode") ?: ""
 
-                        // ✅ FIX: Write identity to prefs synchronously FIRST.
-                        // Guarantees userId is on disk before the service starts.
-                        // Critical for cold restarts after app kill — service reads from prefs.
-                        saveUserIdentitySync(userId, bookerName, designation, companyCode)
+                            // Step 1: Write identity synchronously FIRST
+                            saveUserIdentitySync(userId, bookerName, designation, companyCode)
 
-                        LocationMonitorService.start(
-                            context     = this,
-                            userId      = userId,
-                            bookerName  = bookerName,
-                            designation = designation,
-                            companyCode = companyCode
-                        )
-                        result.success(null)
-                    } catch (e: Exception) {
-                        result.error("START_FAILED", e.message, null)
-                    }
-                }
-                "stopMonitoring" -> {
-                    try {
-                        LocationMonitorService.stop(this)
-                        result.success(null)
-                    } catch (e: Exception) {
-                        result.error("STOP_FAILED", e.message, null)
-                    }
-                }
-                "requestBatteryOptimization" -> {
-                    try {
-                        val pm = getSystemService(POWER_SERVICE) as PowerManager
-                        if (!pm.isIgnoringBatteryOptimizations(packageName)) {
-                            startActivity(
-                                Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                                    data = Uri.parse("package:$packageName")
-                                }
-                            )
+                            // Step 2: Start foreground service
+                            LocationMonitorService.start(this, userId, bookerName, designation, companyCode)
+
+                            // Step 3: Schedule WorkManager upload job
+                            LocationUploadWorker.schedule(this)
+
+                            result.success(null)
+                        } catch (e: Exception) {
+                            result.error("START_FAILED", e.message, null)
                         }
-                        result.success(null)
-                    } catch (e: Exception) {
-                        result.success(null)
                     }
-                }
-                else -> result.notImplemented()
-            }
-        }
-
-        // 2. Sync alarm channel
-        MethodChannel(
-            flutterEngine.dartExecutor.binaryMessenger,
-            SYNC_ALARM_CHANNEL
-        ).setMethodCallHandler { call, result ->
-            when (call.method) {
-                "startAlarm" -> {
-                    try {
-                        SyncAlarmReceiver.startAlarm(this)
-                        result.success(null)
-                    } catch (e: Exception) {
-                        result.error("ALARM_START_FAILED", e.message, null)
+                    "stopMonitoring" -> {
+                        try {
+                            // Stop foreground service
+                            LocationMonitorService.stop(this)
+                            // Cancel WorkManager upload job
+                            LocationUploadWorker.cancel(this)
+                            // Cancel midnight alarm
+                            MidnightClockoutReceiver.cancel(this)
+                            result.success(null)
+                        } catch (e: Exception) {
+                            result.error("STOP_FAILED", e.message, null)
+                        }
                     }
-                }
-                "stopAlarm" -> {
-                    try {
-                        SyncAlarmReceiver.stopAlarm(this)
-                        result.success(null)
-                    } catch (e: Exception) {
-                        result.error("ALARM_STOP_FAILED", e.message, null)
+                    "requestBatteryOptimization" -> {
+                        try {
+                            val pm = getSystemService(POWER_SERVICE) as PowerManager
+                            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                                startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                                    data = Uri.parse("package:$packageName")
+                                })
+                            }
+                            result.success(null)
+                        } catch (_: Exception) { result.success(null) }
                     }
+                    else -> result.notImplemented()
                 }
-                else -> result.notImplemented()
             }
-        }
 
-        // 3. Auto Date & Time channel
-        MethodChannel(
-            flutterEngine.dartExecutor.binaryMessenger,
-            AUTO_TIME_CHANNEL
-        ).setMethodCallHandler { call, result ->
-            when (call.method) {
-                "isAutoTimeEnabled" -> {
-                    result.success(isAutoTimeEnabled())
+        // ── 2. Auto Date & Time Channel ───────────────────────────────────────
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, AUTO_TIME_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "isAutoTimeEnabled"  -> result.success(isAutoTimeEnabled())
+                    "openDateTimeSettings" -> { openDateTimeSettings(); result.success(null) }
+                    else -> result.notImplemented()
                 }
-                "openDateTimeSettings" -> {
-                    openDateTimeSettings()
-                    result.success(null)
-                }
-                else -> result.notImplemented()
             }
-        }
 
-        // 4. OEM Settings Channel
-        MethodChannel(
-            flutterEngine.dartExecutor.binaryMessenger,
-            OEM_SETTINGS_CHANNEL
-        ).setMethodCallHandler { call, result ->
-            when (call.method) {
-                "openOemAutoStartSettings" -> {
-                    openOemAutoStartSettings()
-                    result.success(null)
+        // ── 3. OEM Settings Channel ───────────────────────────────────────────
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, OEM_SETTINGS_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "openOemAutoStartSettings" -> { openOemAutoStartSettings(); result.success(null) }
+                    "getOemBrand"              -> result.success(Build.MANUFACTURER.lowercase())
+                    else -> result.notImplemented()
                 }
-                "getOemBrand" -> {
-                    result.success(getOemBrand())
-                }
-                else -> result.notImplemented()
             }
-        }
     }
 }

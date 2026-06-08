@@ -1,8 +1,1214 @@
+//package com.metaxperts.order_booking_app
+//
+//// ═════════════════════════════════════════════════════════════════════════════
+//// LocationMonitorService — FINAL FIX
+////
+//// ROOT CAUSE OF TIMER STOPPING:
+////   Old code used workingSeconds++ (increment per tick).
+////   When service restarted (START_STICKY / app resume), workingSeconds was
+////   recalculated from clockInTime — but if clockInTime parse failed OR
+////   startAllLoops() was called again (e.g. Flutter calls startMonitoring on
+////   resume), the old runnable was cancelled + new one started from wrong value.
+////
+//// FINAL FIX — Wall-clock timer (no increment, no state):
+////   Every tick reads System.currentTimeMillis() and clockInTimeMs from prefs.
+////   elapsed = (now - clockInTimeMs) / 1000
+////   This means:
+////     ✅ Timer NEVER stops even if service restarts 10 times
+////     ✅ Timer NEVER drifts — always shows real elapsed time
+////     ✅ No workingSeconds state to corrupt
+////     ✅ Notification always accurate even after phone sleep/wake
+////
+//// OTHER FIXES:
+////   ✅ startWorkingTimer() guard — if already running, don't restart
+////   ✅ startAllLoops() guard — timer only starts ONCE per service instance
+////   ✅ startForeground() called ONCE (foregroundStarted flag)
+////   ✅ START_NOT_STICKY on error paths to avoid OS restart loop
+//// ═════════════════════════════════════════════════════════════════════════════
+//
+//import android.Manifest
+//import android.app.Notification
+//import android.app.NotificationChannel
+//import android.app.NotificationManager
+//import android.app.PendingIntent
+//import android.app.Service
+//import android.content.BroadcastReceiver
+//import android.content.Context
+//import android.content.Intent
+//import android.content.IntentFilter
+//import android.content.pm.PackageManager
+//import android.content.pm.ServiceInfo
+//import android.location.LocationManager as SysLocationManager
+//import android.net.ConnectivityManager
+//import android.net.Network
+//import android.net.NetworkCapabilities
+//import android.net.NetworkRequest
+//import android.os.Build
+//import android.os.Handler
+//import android.os.IBinder
+//import android.os.Looper
+//import android.os.PowerManager
+//import android.provider.Settings
+//import androidx.core.app.NotificationCompat
+//import androidx.core.content.ContextCompat
+//import com.google.android.gms.location.FusedLocationProviderClient
+//import com.google.android.gms.location.LocationCallback
+//import com.google.android.gms.location.LocationRequest
+//import com.google.android.gms.location.LocationResult
+//import com.google.android.gms.location.LocationServices
+//import com.google.android.gms.location.Priority
+//import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken
+//import org.eclipse.paho.client.mqttv3.MqttCallback
+//import org.eclipse.paho.client.mqttv3.MqttClient
+//import org.eclipse.paho.client.mqttv3.MqttConnectOptions
+//import org.eclipse.paho.client.mqttv3.MqttMessage
+//import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence
+//import org.json.JSONObject
+//import java.text.SimpleDateFormat
+//import java.util.Date
+//import java.util.Locale
+//import java.util.UUID
+//import java.util.concurrent.Executors
+//
+//class LocationMonitorService : Service() {
+//
+//    // ─── Notification IDs & Channels ─────────────────────────────────────────
+//    private val CHANNEL_ID              = "location_monitor_channel"
+//    private val URGENT_CHANNEL_ID       = "urgent_auto_clockout_channel"
+//    private val NOTIFICATION_ID         = 1001
+//    private val WORKING_NOTIFICATION_ID = 1002
+//
+//    // ─── MQTT ─────────────────────────────────────────────────────────────────
+//    private val MQTT_HOST             = "119.153.102.7"
+//    private val MQTT_PORT             = 1883
+//    private val MQTT_PUBLISH_INTERVAL = 60_000L
+//    private val MQTT_RECONNECT_DELAY  = 15_000L
+//    private val DEFAULT_COMPANY_CODE  = "PK-PUN-SKT-MX01-VT001"
+//
+//    // ─── SharedPreferences Keys ───────────────────────────────────────────────
+//    private val PREFS_NAME              = "FlutterSharedPreferences"
+//    private val KEY_IS_CLOCKED_IN       = "flutter.isClockedIn"
+//    private val KEY_IS_TIMER_FROZEN     = "flutter.is_timer_frozen"
+//    private val KEY_ELAPSED_TIME        = "flutter.elapsed_time"
+//    private val KEY_HAS_CRITICAL_EVENT  = "flutter.has_critical_event_pending"
+//    private val KEY_EVENT_TIMESTAMP     = "flutter.critical_event_timestamp"
+//    private val KEY_EVENT_REASON        = "flutter.critical_event_reason"
+//    private val KEY_EVENT_DISTANCE      = "flutter.critical_event_distance"
+//    private val KEY_EVENT_LAT           = "flutter.critical_event_latitude"
+//    private val KEY_EVENT_LNG           = "flutter.critical_event_longitude"
+//    private val KEY_BG_CLOCKOUT_PAYLOAD = "flutter.bg_clockout_payload"
+//    private val KEY_FAKE_GPS_DETECTED   = "flutter.fake_gps_detected"
+//    private val KEY_LAST_SAVE_WALL_MS   = "flutter.last_location_save_wall_ms"
+//    // KEY for wall-clock clock-in time (milliseconds) — written on clock-in
+//    private val KEY_CLOCK_IN_WALL_MS    = "flutter.clock_in_wall_ms"
+//
+//    companion object {
+//        const val EXTRA_USER_ID      = "extra_user_id"
+//        const val EXTRA_BOOKER_NAME  = "extra_booker_name"
+//        const val EXTRA_DESIGNATION  = "extra_designation"
+//        const val EXTRA_COMPANY_CODE = "extra_company_code"
+//
+//        @Volatile var isRunning = false
+//            private set
+//
+//        fun start(
+//            context: Context,
+//            userId: String      = "",
+//            bookerName: String  = "",
+//            designation: String = "",
+//            companyCode: String = ""
+//        ) {
+//            val intent = Intent(context, LocationMonitorService::class.java).apply {
+//                putExtra(EXTRA_USER_ID,      userId)
+//                putExtra(EXTRA_BOOKER_NAME,  bookerName)
+//                putExtra(EXTRA_DESIGNATION,  designation)
+//                putExtra(EXTRA_COMPANY_CODE, companyCode)
+//            }
+//            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+//                context.startForegroundService(intent)
+//            else
+//                context.startService(intent)
+//        }
+//
+//        fun stop(context: Context) {
+//            context.stopService(Intent(context, LocationMonitorService::class.java))
+//        }
+//    }
+//
+//    // ─── State ────────────────────────────────────────────────────────────────
+//    private lateinit var handler: Handler
+//    private val ioExecutor = Executors.newSingleThreadExecutor { r ->
+//        Thread(r, "LocationIOThread").apply { isDaemon = true }
+//    }
+//
+//    @Volatile private var foregroundStarted = false
+//    @Volatile private var isDestroyed       = false
+//    @Volatile private var isMqttConnected   = false
+//    // TIMER FIX: guard so timer starts only once per service instance
+//    @Volatile private var timerStarted      = false
+//
+//    private var userId      = ""
+//    private var bookerName  = ""
+//    private var designation = ""
+//    private var companyCode = ""
+//
+//    @Volatile private var lastLat      = 0.0
+//    @Volatile private var lastLon      = 0.0
+//    @Volatile private var lastAccuracy = 0f
+//    @Volatile private var lastSpeed    = 0f
+//    @Volatile private var lastRealLat  = 0.0
+//    @Volatile private var lastRealLon  = 0.0
+//
+//    private var fusedClient:   FusedLocationProviderClient? = null
+//    private var fusedCallback: LocationCallback?            = null
+//
+//    @Volatile private var gpsPolicy: GpsPolicy = GpsPolicy(60L, "high")
+//
+//    // TIMER FIX: no more workingSeconds — use wall clock instead
+//    private var clockInWallMs          = 0L
+//    private var workingTimerRunnable:  Runnable? = null
+//
+//    // ── Persistent WakeLock — keeps CPU alive while service is running ─────────
+//    // Acquired in onStartCommand (after startForeground), released in onDestroy.
+//    // PARTIAL_WAKE_LOCK: screen can turn off but CPU stays on → GPS + DB writes work.
+//    private var persistentWakeLock: PowerManager.WakeLock? = null
+//
+//    private var mqttClient:            MqttClient? = null
+//    private var mqttPublishRunnable:   Runnable?   = null
+//    private var mqttReconnectRunnable: Runnable?   = null
+//    private var mqttPublishCount = 0
+//
+//    private var wasLocationEnabled   = true
+//    private var wasPermissionGranted = true
+//    private var lastEventTime: Long  = 0
+//    private var lastEventReason      = ""
+//
+//    private val PREF_SAVE_ANCHOR_WALL  = "flutter.location_save_anchor_wall_ms"
+//    private var saveAnchorMs           = 0L
+//    private var locationSaveRunnable:  Runnable? = null
+//    private var policyRefreshRunnable: Runnable? = null
+//    private var checkRunnable:         Runnable? = null
+//
+//    private var connectivityManager: ConnectivityManager? = null
+//    private var networkCallback:     ConnectivityManager.NetworkCallback? = null
+//
+//    private val nativeDb: NativeDBHelper by lazy { NativeDBHelper(applicationContext) }
+//
+//    private val FAKE_GPS_COOLDOWN_MS     = 30_000L
+//    @Volatile private var lastFakeGpsEventTime = 0L
+//
+//    // ═════════════════════════════════════════════════════════════════════════
+//    // Lifecycle
+//    // ═════════════════════════════════════════════════════════════════════════
+//
+//    override fun onCreate() {
+//        super.onCreate()
+//        isRunning = true
+//        handler   = Handler(Looper.getMainLooper())
+//        registerReceivers()
+//        registerNetworkCallback()
+//        log("✅ [Service] onCreate")
+//    }
+//
+//    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+//        createNotificationChannels()
+//
+//        // startForeground() ONCE — must happen within 5s of startForegroundService()
+//        if (!foregroundStarted) {
+//            foregroundStarted = true
+//            try {
+//                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+//                    startForeground(NOTIFICATION_ID, buildServiceNotification("⏳ Starting…"),
+//                        ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
+//                } else {
+//                    startForeground(NOTIFICATION_ID, buildServiceNotification("⏳ Starting…"))
+//                }
+//            } catch (e: Exception) {
+//                log("❌ [Service] startForeground failed: ${e.message}")
+//                isRunning = false
+//                stopSelf()
+//                return START_NOT_STICKY
+//            }
+//            // ── Acquire persistent WakeLock right after startForeground ────────
+//            // Must happen here (not in onCreate) so it's re-acquired on each
+//            // START_STICKY restart, keeping the CPU awake for GPS + DB writes.
+//            acquirePersistentWakeLock()
+//        }
+//
+//        // Resolve identity
+//        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+//        val intentUserId = intent?.getStringExtra(EXTRA_USER_ID)?.takeIf { it.isNotEmpty() }
+//        if (intentUserId != null) {
+//            userId      = intentUserId
+//            bookerName  = intent.getStringExtra(EXTRA_BOOKER_NAME)  ?: ""
+//            designation = intent.getStringExtra(EXTRA_DESIGNATION)   ?: ""
+//            companyCode = intent.getStringExtra(EXTRA_COMPANY_CODE)
+//                ?.takeIf { it.isNotEmpty() } ?: DEFAULT_COMPANY_CODE
+//            prefs.edit()
+//                .putString("flutter.userId",          userId)
+//                .putString("flutter.userName",        bookerName)
+//                .putString("flutter.userDesignation", designation)
+//                .putString("flutter.companyCode",     companyCode)
+//                .commit()
+//        } else {
+//            userId      = prefs.getString("flutter.userId",          "") ?: ""
+//            bookerName  = prefs.getString("flutter.userName",        "") ?: ""
+//            designation = prefs.getString("flutter.userDesignation", "") ?: ""
+//            companyCode = (prefs.getString("flutter.companyCode",    "") ?: "")
+//                .ifEmpty { DEFAULT_COMPANY_CODE }
+//        }
+//
+//        if (userId.isEmpty()) {
+//            log("❌ [Service] userId empty — stopSelf")
+//            stopSelf()
+//            return START_NOT_STICKY
+//        }
+//
+//        val clockedIn = prefs.getBoolean(KEY_IS_CLOCKED_IN, false)
+//        val isFrozen  = prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)
+//
+//        wasPermissionGranted = checkLocationPermission()
+//        wasLocationEnabled   = isLocationEnabled()
+//
+//        if (clockedIn && !isFrozen) {
+//            if (!wasPermissionGranted) {
+//                handler.post { handleCriticalEvent("System ClockOut - Permission Revoked") }
+//                return START_STICKY
+//            }
+//            if (!wasLocationEnabled) {
+//                handler.post { handleCriticalEvent("System ClockOut - Location Off") }
+//                return START_STICKY
+//            }
+//        }
+//
+//        // ── TIMER FIX: resolve clockInWallMs from prefs ───────────────────────
+//        // Priority 1: flutter.clock_in_wall_ms (most accurate, set below)
+//        // Priority 2: flutter.clockInTime ISO string (set by Flutter on clock-in)
+//        // Priority 3: now (fallback — timer starts from 0)
+//        //
+//        // CRITICAL: Always try to write clock_in_wall_ms from clockInTime if not
+//        // already present. This ensures the timer survives service kill/restart
+//        // even if Flutter never explicitly wrote clock_in_wall_ms.
+//        if (clockedIn && !isFrozen) {
+//            val savedWallMs = prefs.getLong(KEY_CLOCK_IN_WALL_MS, 0L)
+//            if (savedWallMs > 0L) {
+//                clockInWallMs = savedWallMs
+//                log("⏱️ [Timer] Restored wall-ms: $clockInWallMs → ${(System.currentTimeMillis() - clockInWallMs) / 1000}s elapsed")
+//            } else {
+//                // Try parsing ISO clockInTime from Flutter
+//                val clockInStr = prefs.getString("flutter.clockInTime", "") ?: ""
+//                val parsed = tryParseClockInTime(clockInStr)
+//                clockInWallMs = if (parsed > 0L) {
+//                    // Save it as wall-ms so we don't parse again on next restart
+//                    prefs.edit().putLong(KEY_CLOCK_IN_WALL_MS, parsed).commit()
+//                    log("⏱️ [Timer] Parsed clockInTime: $clockInStr → ${(System.currentTimeMillis() - parsed) / 1000}s elapsed")
+//                    parsed
+//                } else {
+//                    // Fallback: check if elapsed_time string gives us a clue
+//                    // e.g. "01:23:45" → subtract that from now to reconstruct clockInTime
+//                    val elapsedStr = prefs.getString(KEY_ELAPSED_TIME, "") ?: ""
+//                    val elapsedSec = parseElapsedToSeconds(elapsedStr)
+//                    if (elapsedSec > 0L) {
+//                        val reconstructed = System.currentTimeMillis() - (elapsedSec * 1000L)
+//                        prefs.edit().putLong(KEY_CLOCK_IN_WALL_MS, reconstructed).commit()
+//                        log("⏱️ [Timer] Reconstructed from elapsed_time '$elapsedStr' → ${elapsedSec}s ago")
+//                        reconstructed
+//                    } else {
+//                        // True fallback — treat as clocked in just now
+//                        val now = System.currentTimeMillis()
+//                        prefs.edit().putLong(KEY_CLOCK_IN_WALL_MS, now).commit()
+//                        log("⚠️ [Timer] Could not parse clockInTime — starting from 0")
+//                        now
+//                    }
+//                }
+//            }
+//        }
+//
+//        startAllLoops(prefs, resetAnchor = (intent?.action == "ACTION_CLOCK_IN"))
+//
+//        return START_STICKY
+//    }
+//
+//    // Parse ISO string "yyyy-MM-dd'T'HH:mm:ss" or "yyyy-MM-dd HH:mm:ss" → epoch ms
+//    private fun tryParseClockInTime(str: String): Long {
+//        if (str.isEmpty()) return 0L
+//        val formats = listOf(
+//            "yyyy-MM-dd'T'HH:mm:ss",
+//            "yyyy-MM-dd HH:mm:ss",
+//            "yyyy-MM-dd'T'HH:mm:ss.SSS"
+//        )
+//        for (fmt in formats) {
+//            try {
+//                val d = SimpleDateFormat(fmt, Locale.getDefault()).parse(str)
+//                if (d != null) return d.time
+//            } catch (_: Exception) {}
+//        }
+//        return 0L
+//    }
+//
+//    // Parse "HH:mm:ss" elapsed string → total seconds
+//    // Used to reconstruct clockInWallMs when clock_in_wall_ms pref is missing
+//    private fun parseElapsedToSeconds(str: String): Long {
+//        if (str.isEmpty()) return 0L
+//        return try {
+//            val parts = str.split(":")
+//            if (parts.size == 3) {
+//                val h = parts[0].toLong()
+//                val m = parts[1].toLong()
+//                val s = parts[2].toLong()
+//                h * 3600L + m * 60L + s
+//            } else 0L
+//        } catch (_: Exception) { 0L }
+//    }
+//
+//    override fun onTaskRemoved(rootIntent: Intent?) {
+//        super.onTaskRemoved(rootIntent)
+//        log("🔄 [Service] App removed from recents — scheduling AlarmManager watchdog")
+//
+//        // START_STICKY alone is often killed by aggressive OEMs (Vivo, Xiaomi, OPPO).
+//        // Belt-and-suspenders: also schedule a 5-second AlarmManager wakeup that
+//        // fires ServiceRestartReceiver → it checks isClockedIn and restarts service.
+//        try {
+//            val prefs     = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+//            val clockedIn = prefs.getBoolean(KEY_IS_CLOCKED_IN, false)
+//            val isFrozen  = prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)
+//            if (!clockedIn || isFrozen) return
+//
+//            val am = getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
+//            val intent = android.content.Intent(this, ServiceRestartReceiver::class.java).apply {
+//                action = ServiceRestartReceiver.ACTION_RESTART_SERVICE
+//            }
+//            val pi = android.app.PendingIntent.getBroadcast(
+//                this, 9001, intent,
+//                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+//            )
+//            val triggerAt = System.currentTimeMillis() + 5_000L
+//            when {
+//                Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ->
+//                    am.setAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP, triggerAt, pi)
+//                else -> am.set(android.app.AlarmManager.RTC_WAKEUP, triggerAt, pi)
+//            }
+//            log("✅ [Service] Watchdog alarm set for +5s")
+//        } catch (e: Exception) {
+//            log("⚠️ [Service] Watchdog alarm failed: ${e.message}")
+//        }
+//    }
+//
+//    override fun onDestroy() {
+//        isDestroyed   = true
+//        isRunning     = false
+//        timerStarted  = false
+//
+//        val prefs     = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+//        val clockedIn = prefs.getBoolean(KEY_IS_CLOCKED_IN, false)
+//        val isFrozen  = prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)
+//
+//        if (clockedIn && !isFrozen) {
+//            val permRevoked = !checkLocationPermission()
+//            val locOff      = !isLocationEnabled()
+//            if (permRevoked || locOff) {
+//                val reason = if (permRevoked) "System ClockOut - Permission Revoked"
+//                else             "System ClockOut - Location Off"
+//                saveCriticalEventToPrefs(prefs, reason)
+//                MidnightClockoutReceiver.cancel(this)
+//            }
+//        }
+//
+//        stopAllLoops()
+//        disconnectMqtt()
+//        unregisterNetworkCallback()
+//        try { unregisterReceiver(locationModeReceiver)   } catch (_: Exception) {}
+//        try { unregisterReceiver(screenReceiver)         } catch (_: Exception) {}
+//        try { unregisterReceiver(dateTimeChangeReceiver) } catch (_: Exception) {}
+//        ioExecutor.shutdown()
+//
+//        // ── ROOT FIX: Remove BOTH notifications + release WakeLock ───────────
+//        // Without stopForeground(), notification 1001 stays stuck in status bar
+//        // even after stopService() — this is the "stuck notification" bug.
+//        try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) {}
+//        try { (getSystemService(NotificationManager::class.java)).cancel(NOTIFICATION_ID) } catch (_: Exception) {}
+//        try { (getSystemService(NotificationManager::class.java)).cancel(WORKING_NOTIFICATION_ID) } catch (_: Exception) {}
+//        releasePersistentWakeLock()
+//
+//        super.onDestroy()
+//        log("🛑 [Service] onDestroy")
+//    }
+//
+//    override fun onBind(intent: Intent?): IBinder? = null
+//
+//    // ═════════════════════════════════════════════════════════════════════════
+//    // Start / Stop all loops
+//    // ═════════════════════════════════════════════════════════════════════════
+//
+//    private fun startAllLoops(
+//        prefs: android.content.SharedPreferences,
+//        resetAnchor: Boolean
+//    ) {
+//        val clockedIn = prefs.getBoolean(KEY_IS_CLOCKED_IN, false)
+//        val isFrozen  = prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)
+//
+//        // GPS policy fetch (async) → then start GPS + save loop
+//        ioExecutor.submit {
+//            gpsPolicy = GpsPolicyManager.fetchPolicy(this, forceRefresh = true)
+//            log("📋 [Policy] interval=${gpsPolicy.locationIntervalSec}s accuracy=${gpsPolicy.gpsAccuracy}")
+//            handler.post { restartGpsAndSaveLoop(resetAnchor) }
+//        }
+//
+//        if (clockedIn && !isFrozen) {
+//            // TIMER FIX: only start timer once per service instance
+//            if (!timerStarted) {
+//                timerStarted = true
+//                startWorkingTimer()
+//            }
+//            MidnightClockoutReceiver.schedule(this)
+//            LocationUploadWorker.schedule(this)
+//        }
+//
+//        startMqttPublishing()
+//        startPermissionCheckLoop()
+//        startPolicyRefreshLoop()
+//    }
+//
+//    private fun stopAllLoops() {
+//        checkRunnable?.let        { handler.removeCallbacks(it) }
+//        workingTimerRunnable?.let { handler.removeCallbacks(it) }
+//        policyRefreshRunnable?.let{ handler.removeCallbacks(it) }
+//        locationSaveRunnable?.let { handler.removeCallbacks(it) }
+//        mqttPublishRunnable?.let  { handler.removeCallbacks(it) }
+//        mqttReconnectRunnable?.let{ handler.removeCallbacks(it) }
+//        handler.removeCallbacksAndMessages(null)
+//        stopLocationUpdates()
+//        try { (getSystemService(NotificationManager::class.java)).cancel(WORKING_NOTIFICATION_ID) } catch (_: Exception) {}
+//    }
+//
+//    // ═════════════════════════════════════════════════════════════════════════
+//    // Working Timer — WALL CLOCK BASED (the real fix)
+//    //
+//    // Instead of workingSeconds++, we calculate:
+//    //   elapsed = (System.currentTimeMillis() - clockInWallMs) / 1000
+//    //
+//    // This means:
+//    //   - Phone sleep/wake → timer picks up exactly where it left off
+//    //   - Service restart  → timer picks up exactly where it left off
+//    //   - App kill/resume  → timer picks up exactly where it left off
+//    //   - No drift, no stuck, no reset
+//    // ═════════════════════════════════════════════════════════════════════════
+//
+//    private fun startWorkingTimer() {
+//        workingTimerRunnable?.let { handler.removeCallbacks(it) }
+//
+//        workingTimerRunnable = object : Runnable {
+//            override fun run() {
+//                if (isDestroyed) return
+//
+//                val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+//                // Stop ticking if clocked out or frozen
+//                if (!prefs.getBoolean(KEY_IS_CLOCKED_IN, false) ||
+//                    prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)) {
+//                    return
+//                }
+//
+//                // WALL CLOCK: always calculate from actual clock-in time
+//                val ref = if (clockInWallMs > 0L) clockInWallMs
+//                else prefs.getLong(KEY_CLOCK_IN_WALL_MS, System.currentTimeMillis())
+//
+//                val totalSec = ((System.currentTimeMillis() - ref) / 1000L).coerceAtLeast(0L)
+//                val h = totalSec / 3600
+//                val m = (totalSec % 3600) / 60
+//                val s = totalSec % 60
+//                val timeStr = "%02d:%02d:%02d".format(h, m, s)
+//
+//                updateWorkingTimerNotification(timeStr)
+//
+//                // Persist for Flutter to read
+//                try {
+//                    prefs.edit().putString(KEY_ELAPSED_TIME, timeStr).apply()
+//                } catch (_: Exception) {}
+//
+//                // Schedule next tick aligned to next second boundary
+//                // This keeps the timer from drifting over time
+//                val nowMs     = System.currentTimeMillis()
+//                val elapsedMs = nowMs - ref
+//                val nextTick  = 1000L - (elapsedMs % 1000L)
+//                val delay     = if (nextTick < 50L) nextTick + 1000L else nextTick
+//
+//                if (!isDestroyed) handler.postDelayed(this, delay)
+//            }
+//        }
+//        handler.post(workingTimerRunnable!!)   // start immediately
+//        log("✅ [Timer] Wall-clock timer started — clockInWallMs=$clockInWallMs")
+//    }
+//
+//    // ═════════════════════════════════════════════════════════════════════════
+//    // GPS Policy
+//    // ═════════════════════════════════════════════════════════════════════════
+//
+//    private fun startPolicyRefreshLoop() {
+//        policyRefreshRunnable = object : Runnable {
+//            override fun run() {
+//                if (isDestroyed) return
+//                ioExecutor.submit {
+//                    val newPolicy = GpsPolicyManager.fetchPolicy(this@LocationMonitorService, forceRefresh = true)
+//                    val changed   = newPolicy.locationIntervalSec != gpsPolicy.locationIntervalSec ||
+//                            newPolicy.gpsAccuracy        != gpsPolicy.gpsAccuracy
+//                    gpsPolicy = newPolicy
+//                    if (changed) {
+//                        log("📋 [Policy] Changed → restarting GPS loop")
+//                        handler.post { restartGpsAndSaveLoop(resetAnchor = true) }
+//                    }
+//                }
+//                if (!isDestroyed) handler.postDelayed(this, 5 * 60_000L)
+//            }
+//        }
+//        handler.postDelayed(policyRefreshRunnable!!, 5 * 60_000L)
+//    }
+//
+//    // ═════════════════════════════════════════════════════════════════════════
+//    // FusedLocation GPS updates
+//    // ═════════════════════════════════════════════════════════════════════════
+//
+//    private fun startLocationUpdates() {
+//        if (!checkLocationPermission()) return
+//        if (fusedCallback != null) return
+//
+//        try {
+//            fusedClient  = LocationServices.getFusedLocationProviderClient(this)
+//            val intervalMs = gpsPolicy.locationIntervalSec * 1000L
+//            val priority = when (gpsPolicy.gpsAccuracy) {
+//                "best", "high" -> Priority.PRIORITY_HIGH_ACCURACY
+//                "medium"       -> Priority.PRIORITY_BALANCED_POWER_ACCURACY
+//                else           -> Priority.PRIORITY_LOW_POWER
+//            }
+//            val request = LocationRequest.Builder(intervalMs)
+//                .setMinUpdateIntervalMillis(intervalMs)
+//                .setMaxUpdateDelayMillis(intervalMs + 5_000L)
+//                .setPriority(priority)
+//                .build()
+//
+//            fusedCallback = object : LocationCallback() {
+//                override fun onLocationResult(result: LocationResult) {
+//                    val loc = result.lastLocation ?: return
+//                    if (loc.isFromMockProvider) {
+//                        log("🚨 [GPS] Mock location detected")
+//                        handleFakeGpsDetected(loc.latitude, loc.longitude)
+//                        return
+//                    }
+//                    lastRealLat = loc.latitude
+//                    lastRealLon = loc.longitude
+//                    val maxAccuracy = when (gpsPolicy.gpsAccuracy) {
+//                        "best"   -> 20f;  "high"   -> 50f
+//                        "medium" -> 100f; "low"    -> 200f
+//                        "lowest" -> 500f; else     -> 100f
+//                    }
+//                    if (loc.accuracy > maxAccuracy) {
+//                        log("⚠️ [GPS] Skipped low-accuracy: ${loc.accuracy}m")
+//                        return
+//                    }
+//                    lastLat      = loc.latitude
+//                    lastLon      = loc.longitude
+//                    lastAccuracy = loc.accuracy
+//                    lastSpeed    = loc.speed
+//                }
+//            }
+//            fusedClient?.requestLocationUpdates(request, fusedCallback!!, Looper.getMainLooper())
+//            log("✅ [GPS] FusedLocation started — interval=${gpsPolicy.locationIntervalSec}s")
+//        } catch (e: Exception) {
+//            log("❌ [GPS] startLocationUpdates failed: ${e.message}")
+//        }
+//    }
+//
+//    private fun stopLocationUpdates() {
+//        try { fusedCallback?.let { fusedClient?.removeLocationUpdates(it) } } catch (_: Exception) {}
+//        fusedCallback = null
+//        fusedClient   = null
+//    }
+//
+//    private fun restartGpsAndSaveLoop(resetAnchor: Boolean) {
+//        if (isDestroyed) return
+//        stopLocationUpdates()
+//        startLocationUpdates()
+//        scheduleLocationSave(resetAnchor)
+//    }
+//
+//    // ═════════════════════════════════════════════════════════════════════════
+//    // Location Save — Anchor-Based Precise Scheduling
+//    // ═════════════════════════════════════════════════════════════════════════
+//
+//    private fun scheduleLocationSave(resetAnchor: Boolean = false) {
+//        locationSaveRunnable?.let { handler.removeCallbacks(it) }
+//        locationSaveRunnable = null
+//
+//        val prefs      = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+//        val nowWall    = System.currentTimeMillis()
+//        val intervalMs = gpsPolicy.locationIntervalSec * 1000L
+//
+//        if (resetAnchor) {
+//            saveAnchorMs = nowWall
+//            prefs.edit().putLong(PREF_SAVE_ANCHOR_WALL, saveAnchorMs).apply()
+//            log("⚓ [SaveLoop] Anchor RESET at $saveAnchorMs")
+//        } else {
+//            val stored = prefs.getLong(PREF_SAVE_ANCHOR_WALL, 0L)
+//            saveAnchorMs = if (stored > 0L && stored <= nowWall) stored else {
+//                nowWall.also { prefs.edit().putLong(PREF_SAVE_ANCHOR_WALL, it).apply() }
+//            }
+//        }
+//        scheduleNextSaveTick()
+//    }
+//
+//    private fun scheduleNextSaveTick() {
+//        if (isDestroyed) return
+//
+//        val intervalMs = gpsPolicy.locationIntervalSec * 1000L
+//        val nowWall    = System.currentTimeMillis()
+//        val elapsed    = nowWall - saveAnchorMs
+//        val ticksDone  = elapsed / intervalMs
+//        val nextWall   = saveAnchorMs + (ticksDone + 1) * intervalMs
+//        var delayMs    = nextWall - nowWall
+//        if (delayMs <= 0L) delayMs = intervalMs
+//
+//        log("⏱️ [SaveLoop] Next save in ${delayMs / 1000}s (interval=${intervalMs / 1000}s)")
+//
+//        locationSaveRunnable = Runnable {
+//            if (isDestroyed) return@Runnable
+//            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+//            if (prefs.getBoolean(KEY_IS_CLOCKED_IN, false) &&
+//                !prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)) {
+//                ioExecutor.submit { saveLocationToDB(prefs) }
+//            }
+//            scheduleNextSaveTick()
+//        }
+//        handler.postDelayed(locationSaveRunnable!!, delayMs)
+//    }
+//
+//    private fun saveLocationToDB(prefs: android.content.SharedPreferences) {
+//        val lat = lastLat
+//        val lon = lastLon
+//        if (lat == 0.0 && lon == 0.0) {
+//            log("⚠️ [SaveLoop] No GPS fix yet — skipping")
+//            return
+//        }
+//        val wl = acquireShortWakeLock("BookIT::DbWriteLock", 15_000L)
+//        try {
+//            val now  = Date()
+//            val sdf  = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+//            val stf  = SimpleDateFormat("HH:mm:ss",   Locale.getDefault())
+//            val ddf  = SimpleDateFormat("dd",          Locale.getDefault())
+//            val mdf  = SimpleDateFormat("MMM",         Locale.getDefault())
+//            val rowId = "LT-$userId-${ddf.format(now)}-${mdf.format(now)}" +
+//                    "-${UUID.randomUUID().toString().takeLast(6).uppercase()}"
+//            val code = companyCode.ifEmpty { DEFAULT_COMPANY_CODE }
+//            nativeDb.insertLocationRow(
+//                id          = rowId,
+//                date        = sdf.format(now),
+//                time        = stf.format(now),
+//                userId      = userId,
+//                lat         = lat.toString(),
+//                lng         = lon.toString(),
+//                bookerName  = bookerName,
+//                designation = designation,
+//                companyCode = code
+//            )
+//            prefs.edit().putLong(KEY_LAST_SAVE_WALL_MS, System.currentTimeMillis()).apply()
+//            log("💾 [SaveLoop] Saved: $rowId lat=$lat lng=$lon")
+//        } catch (e: Exception) {
+//            log("❌ [SaveLoop] DB save failed: ${e.message}")
+//        } finally {
+//            releaseWakeLock(wl)
+//        }
+//    }
+//
+//    // ═════════════════════════════════════════════════════════════════════════
+//    // MQTT
+//    // ═════════════════════════════════════════════════════════════════════════
+//
+//    private fun startMqttPublishing() {
+//        connectMqtt()
+//        mqttPublishRunnable?.let { handler.removeCallbacks(it) }
+//        mqttPublishRunnable = object : Runnable {
+//            override fun run() {
+//                if (isDestroyed) return
+//                publishLocationToMqtt()
+//                handler.postDelayed(this, MQTT_PUBLISH_INTERVAL)
+//            }
+//        }
+//        handler.postDelayed(mqttPublishRunnable!!, MQTT_PUBLISH_INTERVAL)
+//    }
+//
+//    private fun connectMqtt() {
+//        ioExecutor.submit {
+//            try {
+//                if (isMqttConnected) return@submit
+//                val clientId = "android-$userId-${UUID.randomUUID().toString().take(8)}"
+//                val client   = MqttClient("tcp://$MQTT_HOST:$MQTT_PORT", clientId, MemoryPersistence())
+//                client.setCallback(object : MqttCallback {
+//                    override fun connectionLost(cause: Throwable?) {
+//                        isMqttConnected = false
+//                        handler.post { scheduleReconnect() }
+//                    }
+//                    override fun messageArrived(t: String?, m: MqttMessage?) {}
+//                    override fun deliveryComplete(t: IMqttDeliveryToken?) {}
+//                })
+//                val opts = MqttConnectOptions().apply {
+//                    isCleanSession       = true
+//                    connectionTimeout    = 10
+//                    keepAliveInterval    = 30
+//                    isAutomaticReconnect = false
+//                }
+//                client.connect(opts)
+//                mqttClient      = client
+//                isMqttConnected = true
+//                handler.post { updateServiceNotification("✅ Live tracking active") }
+//                log("✅ [MQTT] Connected")
+//            } catch (e: Exception) {
+//                isMqttConnected = false
+//                handler.post { scheduleReconnect() }
+//                log("❌ [MQTT] Connect failed: ${e.message}")
+//            }
+//        }
+//    }
+//
+//    private fun disconnectMqtt() {
+//        mqttReconnectRunnable?.let { handler.removeCallbacks(it) }
+//        mqttReconnectRunnable = null
+//        ioExecutor.submit {
+//            try { if (mqttClient?.isConnected == true) mqttClient?.disconnect(0) } catch (_: Exception) {}
+//            mqttClient = null; isMqttConnected = false
+//        }
+//    }
+//
+//    private fun scheduleReconnect() {
+//        if (isDestroyed) return
+//        mqttReconnectRunnable?.let { handler.removeCallbacks(it) }
+//        mqttReconnectRunnable = Runnable { if (!isDestroyed && !isMqttConnected) connectMqtt() }
+//        handler.postDelayed(mqttReconnectRunnable!!, MQTT_RECONNECT_DELAY)
+//    }
+//
+//    private fun publishLocationToMqtt() {
+//        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+//        if (!prefs.getBoolean(KEY_IS_CLOCKED_IN, false)) return
+//        if (prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)) return
+//        if (lastLat == 0.0 && lastLon == 0.0) return
+//        val payload = JSONObject().apply {
+//            put("device_id",    userId)
+//            put("company_code", companyCode.ifEmpty { DEFAULT_COMPANY_CODE })
+//            put("emp_name",     bookerName)
+//            put("dept_id",      designation)
+//            put("lat",          lastLat)
+//            put("lon",          lastLon)
+//            put("accuracy",     lastAccuracy)
+//            put("speed",        lastSpeed)
+//            put("track_id",     System.currentTimeMillis())
+//            put("timestamp",    SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault()).format(Date()))
+//            put("source",       "android_foreground_service")
+//        }.toString()
+//        ioExecutor.submit {
+//            try {
+//                val client = mqttClient ?: return@submit
+//                if (!client.isConnected) { handler.post { scheduleReconnect() }; return@submit }
+//                val msg = MqttMessage(payload.toByteArray(Charsets.UTF_8)).apply {
+//                    qos = 1; isRetained = false
+//                }
+//                client.publish("gps/${companyCode.ifEmpty { DEFAULT_COMPANY_CODE }}/$userId", msg)
+//                mqttPublishCount++
+//                handler.post { updateServiceNotification("✅ Live tracking • #$mqttPublishCount") }
+//            } catch (e: Exception) {
+//                isMqttConnected = false
+//                handler.post { scheduleReconnect() }
+//            }
+//        }
+//    }
+//
+//    // ═════════════════════════════════════════════════════════════════════════
+//    // Permission / Location Check Loop
+//    // ═════════════════════════════════════════════════════════════════════════
+//
+//    private fun startPermissionCheckLoop() {
+//        checkRunnable = object : Runnable {
+//            override fun run() {
+//                if (isDestroyed) return
+//                checkPermissionsAndLocation()
+//                handler.postDelayed(this, 30_000L)
+//            }
+//        }
+//        handler.postDelayed(checkRunnable!!, 30_000L)
+//    }
+//
+//    private fun checkPermissionsAndLocation() {
+//        val prefs     = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+//        val clockedIn = prefs.getBoolean(KEY_IS_CLOCKED_IN, false)
+//        val isFrozen  = prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)
+//        if (!clockedIn || isFrozen) return
+//
+//        val permOk = checkLocationPermission()
+//        val locOn  = isLocationEnabled()
+//
+//        if (wasPermissionGranted && !permOk) {
+//            val now = System.currentTimeMillis()
+//            if (now - lastEventTime > 5_000L) {
+//                lastEventTime   = now
+//                lastEventReason = "System ClockOut - Permission Revoked"
+//                handleCriticalEvent("System ClockOut - Permission Revoked")
+//                return
+//            }
+//        }
+//        if (wasLocationEnabled && !locOn) {
+//            val now = System.currentTimeMillis()
+//            if (now - lastEventTime > 5_000L) {
+//                lastEventTime   = now
+//                lastEventReason = "System ClockOut - Location Off"
+//                handleCriticalEvent("System ClockOut - Location Off")
+//                return
+//            }
+//        }
+//        wasPermissionGranted = permOk
+//        wasLocationEnabled   = locOn
+//    }
+//
+//    // ═════════════════════════════════════════════════════════════════════════
+//    // Critical Events
+//    // ═════════════════════════════════════════════════════════════════════════
+//
+//    private fun handleCriticalEvent(reason: String) = handleCriticalEventWithTime(reason, Date())
+//
+//    private fun handleCriticalEventWithTime(reason: String, eventTime: Date) {
+//        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+//        if (prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)) return
+//        saveCriticalEventToPrefs(prefs, reason, eventTime)
+//        showCriticalNotification(reason,
+//            SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault()).format(eventTime))
+//        MidnightClockoutReceiver.cancel(this)
+//        LocationUploadWorker.cancel(this)
+//        stopAllLoops()
+//        disconnectMqtt()
+//        try { (getSystemService(NotificationManager::class.java)).cancel(WORKING_NOTIFICATION_ID) } catch (_: Exception) {}
+//        try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) {}
+//        stopSelf()
+//    }
+//
+//    fun handleFakeGpsDetected(fakeLat: Double, fakeLng: Double) {
+//        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+//        if (!prefs.getBoolean(KEY_IS_CLOCKED_IN, false) ||
+//            prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)) return
+//        val now = System.currentTimeMillis()
+//        if (now - lastFakeGpsEventTime < FAKE_GPS_COOLDOWN_MS) return
+//        lastFakeGpsEventTime = now
+//        handler.post {
+//            val prefs2   = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+//            val ts       = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault()).format(Date())
+//            val elapsed  = prefs2.getString(KEY_ELAPSED_TIME, "00:00:00") ?: "00:00:00"
+//            val clockInT = prefs2.getString("flutter.clockInTime", "") ?: ""
+//            prefs2.edit()
+//                .putBoolean(KEY_HAS_CRITICAL_EVENT, true)
+//                .putBoolean("has_critical_event_pending", true)
+//                .putBoolean(KEY_IS_TIMER_FROZEN, true)
+//                .putString(KEY_EVENT_TIMESTAMP,  ts)
+//                .putString(KEY_EVENT_REASON,     "System ClockOut - Fake GPS Detected")
+//                .putString("critical_event_reason", "System ClockOut - Fake GPS Detected")
+//                .putBoolean(KEY_IS_CLOCKED_IN, false)
+//                .putBoolean("isClockedIn", false)
+//                .putBoolean(KEY_FAKE_GPS_DETECTED, true)
+//                .putFloat("flutter.fake_gps_lat", fakeLat.toFloat())
+//                .putFloat("flutter.fake_gps_lon", fakeLng.toFloat())
+//                .putFloat("flutter.real_gps_lat", lastRealLat.toFloat())
+//                .putFloat("flutter.real_gps_lon", lastRealLon.toFloat())
+//                .putString("flutter.fastClockOutTime", ts)
+//                .putFloat("flutter.fastClockOutDistance", 0f)
+//                .putString("flutter.fastClockOutReason", "System ClockOut - Fake GPS Detected")
+//                .putBoolean("flutter.hasFastClockOutData", true)
+//                .putBoolean("flutter.clockOutPending", true)
+//                .putString("flutter.fastClockOutData",
+//                    """{"fast_attendanceId":"","fast_userId":"$userId","fast_clockOutTime":"$ts","fast_totalTime":"$elapsed","fast_totalDistance":0.0,"fast_latOut":${lastRealLat},"fast_lngOut":${lastRealLon},"fast_address":"","fast_reason":"System ClockOut - Fake GPS Detected","fast_savedAt":"${System.currentTimeMillis()}","fast_clockInTime":"$clockInT"}""")
+//                .commit()
+//            showCriticalNotification("System ClockOut - Fake GPS Detected", ts)
+//            MidnightClockoutReceiver.cancel(this)
+//            LocationUploadWorker.cancel(this)
+//            stopAllLoops()
+//            disconnectMqtt()
+//            try { (getSystemService(NotificationManager::class.java)).cancel(WORKING_NOTIFICATION_ID) } catch (_: Exception) {}
+//            try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) {}
+//            stopSelf()
+//        }
+//    }
+//
+//    private fun saveCriticalEventToPrefs(
+//        prefs: android.content.SharedPreferences,
+//        reason: String,
+//        eventTime: Date = Date()
+//    ) {
+//        val ts       = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault()).format(eventTime)
+//        val elapsed  = prefs.getString(KEY_ELAPSED_TIME, "00:00:00") ?: "00:00:00"
+//        val clockInT = prefs.getString("flutter.clockInTime", "") ?: ""
+//        prefs.edit()
+//            .putBoolean(KEY_HAS_CRITICAL_EVENT, true)
+//            .putBoolean("has_critical_event_pending", true)
+//            .putBoolean(KEY_IS_TIMER_FROZEN, true)
+//            .putString(KEY_EVENT_TIMESTAMP, ts)
+//            .putString(KEY_EVENT_REASON, reason)
+//            .putString("critical_event_reason", reason)
+//            .putFloat(KEY_EVENT_DISTANCE, 0f)
+//            .putFloat(KEY_EVENT_LAT, 0f)
+//            .putFloat(KEY_EVENT_LNG, 0f)
+//            .putBoolean(KEY_IS_CLOCKED_IN, false)
+//            .putBoolean("isClockedIn", false)
+//            .putBoolean("flutter.pending_gpx_close", true)
+//            .putString("flutter.fastClockOutTime", ts)
+//            .putFloat("flutter.fastClockOutDistance", 0f)
+//            .putString("flutter.fastClockOutReason", reason)
+//            .putBoolean("flutter.hasFastClockOutData", true)
+//            .putBoolean("flutter.clockOutPending", true)
+//            .putString("flutter.fastClockOutData",
+//                """{"fast_attendanceId":"","fast_userId":"$userId","fast_clockOutTime":"$ts","fast_totalTime":"$elapsed","fast_totalDistance":0.0,"fast_latOut":0.0,"fast_lngOut":0.0,"fast_address":"","fast_reason":"$reason","fast_savedAt":"${System.currentTimeMillis()}","fast_clockInTime":"$clockInT"}""")
+//            .putString(KEY_BG_CLOCKOUT_PAYLOAD,
+//                """{"timestamp":"$ts","reason":"$reason","elapsed_at_event":"$elapsed","distance":0.0,"latitude":0.0,"longitude":0.0}""")
+//            .commit()
+//        log("💾 [Critical] Saved: reason=$reason ts=$ts")
+//    }
+//
+//    // ═════════════════════════════════════════════════════════════════════════
+//    // Broadcast Receivers
+//    // ═════════════════════════════════════════════════════════════════════════
+//
+//    private val locationModeReceiver = object : BroadcastReceiver() {
+//        override fun onReceive(context: Context?, intent: Intent?) {
+//            if (intent?.action == SysLocationManager.MODE_CHANGED_ACTION)
+//                handler.post { checkPermissionsAndLocation() }
+//        }
+//    }
+//
+//    private val screenReceiver = object : BroadcastReceiver() {
+//        override fun onReceive(context: Context?, intent: Intent?) {
+//            handler.post { checkPermissionsAndLocation() }
+//        }
+//    }
+//
+//    private val dateTimeChangeReceiver = object : BroadcastReceiver() {
+//        override fun onReceive(context: Context?, intent: Intent?) {}
+//    }
+//
+//    private fun registerReceivers() {
+//        registerReceiver(locationModeReceiver, IntentFilter(SysLocationManager.MODE_CHANGED_ACTION))
+//        registerReceiver(screenReceiver, IntentFilter(Intent.ACTION_SCREEN_ON))
+//        val tf = IntentFilter().apply {
+//            addAction(Intent.ACTION_TIME_CHANGED)
+//            addAction(Intent.ACTION_DATE_CHANGED)
+//            addAction(Intent.ACTION_TIMEZONE_CHANGED)
+//        }
+//        registerReceiver(dateTimeChangeReceiver, tf)
+//    }
+//
+//    private fun registerNetworkCallback() {
+//        try {
+//            connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+//            val req = NetworkRequest.Builder()
+//                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).build()
+//            networkCallback = object : ConnectivityManager.NetworkCallback() {
+//                override fun onAvailable(network: Network) {
+//                    handler.post {
+//                        if (!isDestroyed && !isMqttConnected) connectMqtt()
+//                        ioExecutor.submit {
+//                            gpsPolicy = GpsPolicyManager.fetchPolicy(
+//                                this@LocationMonitorService, forceRefresh = true)
+//                        }
+//                    }
+//                }
+//                override fun onLost(network: Network) {
+//                    isMqttConnected = false
+//                    handler.post { updateServiceNotification("❌ MQTT offline — no internet") }
+//                }
+//            }
+//            connectivityManager?.registerNetworkCallback(req, networkCallback!!)
+//        } catch (e: Exception) { log("⚠️ [Network] Callback reg failed: ${e.message}") }
+//    }
+//
+//    private fun unregisterNetworkCallback() {
+//        try { networkCallback?.let { connectivityManager?.unregisterNetworkCallback(it) } } catch (_: Exception) {}
+//        networkCallback = null
+//    }
+//
+//    // ═════════════════════════════════════════════════════════════════════════
+//    // WakeLock helpers
+//    // ═════════════════════════════════════════════════════════════════════════
+//
+//    // ── Persistent WakeLock (held for entire service lifetime) ────────────────
+//    // PARTIAL_WAKE_LOCK: screen OFF is fine, CPU stays ON.
+//    // This prevents the OS from putting the CPU to sleep while GPS is running.
+//    // Must be held continuously — releasing it even briefly can drop GPS fixes.
+//    private fun acquirePersistentWakeLock() {
+//        try {
+//            if (persistentWakeLock?.isHeld == true) return  // already held
+//            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+//            persistentWakeLock = pm.newWakeLock(
+//                PowerManager.PARTIAL_WAKE_LOCK,
+//                "BookIT::LocationServiceWakeLock"
+//            ).also {
+//                it.setReferenceCounted(false)
+//                it.acquire()  // no timeout — held for entire service lifetime
+//            }
+//            log("✅ [WakeLock] Persistent lock acquired")
+//        } catch (e: Exception) {
+//            log("⚠️ [WakeLock] Persistent lock failed: ${e.message}")
+//        }
+//    }
+//
+//    private fun releasePersistentWakeLock() {
+//        try {
+//            if (persistentWakeLock?.isHeld == true) persistentWakeLock?.release()
+//            persistentWakeLock = null
+//            log("✅ [WakeLock] Persistent lock released")
+//        } catch (_: Exception) {}
+//    }
+//
+//    // ── Short WakeLock (timed, for DB writes) ─────────────────────────────────
+//    private fun acquireShortWakeLock(tag: String, timeoutMs: Long): PowerManager.WakeLock? {
+//        return try {
+//            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+//            pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, tag).also { it.acquire(timeoutMs) }
+//        } catch (e: Exception) { log("⚠️ [WakeLock] $tag failed: ${e.message}"); null }
+//    }
+//
+//    private fun releaseWakeLock(wl: PowerManager.WakeLock?) {
+//        try { if (wl?.isHeld == true) wl.release() } catch (_: Exception) {}
+//    }
+//
+//    // ═════════════════════════════════════════════════════════════════════════
+//    // Notifications
+//    // ═════════════════════════════════════════════════════════════════════════
+//
+//    private fun createNotificationChannels() {
+//        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+//        val nm = getSystemService(NotificationManager::class.java)
+//        nm.createNotificationChannel(
+//            NotificationChannel(CHANNEL_ID, "Location Monitor",
+//                NotificationManager.IMPORTANCE_LOW).apply {
+//                description = "Monitors location for attendance tracking"
+//                setShowBadge(false)
+//                enableVibration(false)
+//                setSound(null, null)
+//            }
+//        )
+//        nm.createNotificationChannel(
+//            NotificationChannel(URGENT_CHANNEL_ID, "URGENT Auto Clockout",
+//                NotificationManager.IMPORTANCE_HIGH).apply {
+//                enableVibration(true)
+//                vibrationPattern = longArrayOf(0, 1000, 500, 1000)
+//                enableLights(true)
+//                lightColor = android.graphics.Color.RED
+//            }
+//        )
+//    }
+//
+//    private fun buildServiceNotification(text: String): Notification {
+//        val pi = PendingIntent.getActivity(this, 0,
+//            packageManager.getLaunchIntentForPackage(packageName),
+//            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+//        return NotificationCompat.Builder(this, CHANNEL_ID)
+//            .setContentTitle("BookIT Attendance Active")
+//            .setContentText(text)
+//            .setSmallIcon(R.mipmap.ic_launcher)
+//            .setContentIntent(pi)
+//            .setOngoing(true)
+//            .setSilent(true)
+//            .setPriority(NotificationCompat.PRIORITY_LOW)
+//            .build()
+//    }
+//
+//    private fun updateServiceNotification(text: String) {
+//        if (isDestroyed) return
+//        val n = buildServiceNotification(text)
+//        (getSystemService(NotificationManager::class.java)).notify(NOTIFICATION_ID, n)
+//    }
+//
+//    private fun updateWorkingTimerNotification(timeStr: String) {
+//        if (isDestroyed) return
+//        val pi = PendingIntent.getActivity(this, 1,
+//            packageManager.getLaunchIntentForPackage(packageName),
+//            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+//        val n = NotificationCompat.Builder(this, CHANNEL_ID)
+//            .setContentTitle("Working Time")
+//            .setContentText("⏱ $timeStr")
+//            .setSmallIcon(R.mipmap.ic_launcher)
+//            .setContentIntent(pi)
+//            .setOngoing(true)
+//            .setSilent(true)
+//            .setPriority(NotificationCompat.PRIORITY_LOW)
+//            .build()
+//        try {
+//            (getSystemService(NotificationManager::class.java)).notify(WORKING_NOTIFICATION_ID, n)
+//        } catch (_: Exception) {}
+//    }
+//
+//    private fun showCriticalNotification(reason: String, time: String) {
+//        val title = when (reason) {
+//            "System ClockOut - Location Off"       -> "⚠️ LOCATION TURNED OFF"
+//            "System ClockOut - Permission Revoked" -> "⚠️ PERMISSION REVOKED"
+//            "System ClockOut - Fake GPS Detected"  -> "🚨 FAKE GPS DETECTED"
+//            else                                   -> "⚠️ AUTO CLOCKOUT"
+//        }
+//        val pi = PendingIntent.getActivity(this, 0,
+//            packageManager.getLaunchIntentForPackage(packageName)?.apply {
+//                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+//            }, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+//        val n = NotificationCompat.Builder(this, URGENT_CHANNEL_ID)
+//            .setContentTitle(title)
+//            .setContentText("Auto clockout at $time. Open app to sync.")
+//            .setSmallIcon(R.mipmap.ic_launcher)
+//            .setPriority(NotificationCompat.PRIORITY_MAX)
+//            .setCategory(NotificationCompat.CATEGORY_ALARM)
+//            .setAutoCancel(true)
+//            .setContentIntent(pi)
+//            .setVibrate(longArrayOf(0, 1000, 500, 1000))
+//            .build()
+//        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(9998, n)
+//    }
+//
+//    // ═════════════════════════════════════════════════════════════════════════
+//    // Helpers
+//    // ═════════════════════════════════════════════════════════════════════════
+//
+//    private fun isLocationEnabled(): Boolean = try {
+//        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+//            (getSystemService(Context.LOCATION_SERVICE) as SysLocationManager).isLocationEnabled
+//        } else {
+//            @Suppress("DEPRECATION")
+//            Settings.Secure.getInt(contentResolver, Settings.Secure.LOCATION_MODE) !=
+//                    Settings.Secure.LOCATION_MODE_OFF
+//        }
+//    } catch (_: Exception) { false }
+//
+//    private fun checkLocationPermission() = try {
+//        ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==
+//                PackageManager.PERMISSION_GRANTED ||
+//                ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) ==
+//                PackageManager.PERMISSION_GRANTED
+//    } catch (_: Exception) { false }
+//
+//    private fun log(msg: String) = android.util.Log.d("LocationMonitor", msg)
+//}
+
 package com.metaxperts.order_booking_app
 
+// ═════════════════════════════════════════════════════════════════════════════
+// LocationMonitorService — GPS PROVIDER EDITION
+//
+// CHANGES FROM PREVIOUS VERSION:
+//   ❌ Removed: FusedLocationProviderClient (Google Play Services dependency)
+//   ✅ Replaced with: android.location.LocationManager (GPS_PROVIDER — native)
+//
+//   ❌ Removed: WakeLock with no timeout (could trigger ANR/OS kill warnings)
+//   ✅ Replaced with: 12-hour WakeLock timeout (covers a full work shift)
+//      If service is still alive after 12 h, START_STICKY restarts it and
+//      re-acquires the lock — continuous operation is still fully supported.
+//
+// WHY NATIVE GPS INSTEAD OF FUSED?
+//   - No Google Play Services dependency (works on HMS / AOSP devices)
+//   - Direct hardware GPS — no fused/network location blending
+//   - Simpler mock-detection path (isMock on API 31+, isFromMockProvider below)
+//   - Full control over provider and update interval
+//
+// TIMER LOGIC, MQTT, DB SAVE, CRITICAL EVENTS: unchanged from previous version
+// ═════════════════════════════════════════════════════════════════════════════
+
 import android.Manifest
-import android.app.AlarmManager
-import android.app.AppOpsManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -14,15 +1220,12 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
-import android.location.Location
-import android.location.LocationListener
-import android.location.LocationManager as SysLocationManager
+// android.location.LocationManager used directly (no alias needed)
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.os.Build
-import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -30,26 +1233,16 @@ import android.os.PowerManager
 import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
-import com.google.android.gms.location.FusedLocationProviderClient
-import com.google.android.gms.location.LocationCallback
-import com.google.android.gms.location.LocationRequest
-import com.google.android.gms.location.LocationResult
-import com.google.android.gms.location.LocationServices
-import com.google.android.gms.location.Priority
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken
 import org.eclipse.paho.client.mqttv3.MqttCallback
 import org.eclipse.paho.client.mqttv3.MqttClient
 import org.eclipse.paho.client.mqttv3.MqttConnectOptions
 import org.eclipse.paho.client.mqttv3.MqttMessage
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence
-import android.content.ContentValues
-import android.database.sqlite.SQLiteDatabase
-import android.database.sqlite.SQLiteOpenHelper
-import org.json.JSONArray
 import org.json.JSONObject
-import java.io.OutputStreamWriter
-import java.net.HttpURLConnection
-import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -58,182 +1251,57 @@ import java.util.concurrent.Executors
 
 class LocationMonitorService : Service() {
 
-    // ─── Constants ───────────────────────────────────────────────────────────
+    // ─── Notification IDs & Channels ─────────────────────────────────────────
     private val CHANNEL_ID              = "location_monitor_channel"
     private val URGENT_CHANNEL_ID       = "urgent_auto_clockout_channel"
     private val NOTIFICATION_ID         = 1001
     private val WORKING_NOTIFICATION_ID = 1002
-    private val CHECK_INTERVAL          = 3_000L   // ✅ FIX: 2s → 30s (battery saving)
-    private val MQTT_PUBLISH_INTERVAL   = 5_000L   // ✅ FIX: 5s → 60s (battery saving)
-    private val MQTT_RECONNECT_DELAY    = 10_000L
-    // ✅ FIX: Permanent WakeLock hataya — sirf 1 hour safety net agar kuch galat ho
-    // Asli GPS wake ab postLocationToServer() mein on-demand hota hai
-    private val WAKELOCK_TIMEOUT_MS     = 1 * 60 * 60 * 1000L  // 1 hour (safety net only)
-    private val WATCHDOG_INTERVAL       = 30_000L
-    private val GPS_HEARTBEAT_TIMEOUT   = 60_000L
 
-    private val PREF_HTTP_POST_ANCHOR_WALL = "flutter.http_post_anchor_wall_ms"
-    private val KEY_KOTLIN_MASTER = "flutter.kotlin_service_is_master"
+    // ─── MQTT ─────────────────────────────────────────────────────────────────
+    private val MQTT_HOST             = "119.153.102.7"
+    private val MQTT_PORT             = 1883
+    private val MQTT_PUBLISH_INTERVAL = 60_000L
+    private val MQTT_RECONNECT_DELAY  = 15_000L
+    private val DEFAULT_COMPANY_CODE  = "PK-PUN-SKT-MX01-VT001"
 
-    // MQTT Broker
-    private val MQTT_HOST    = "119.153.102.7"
-    private val MQTT_PORT    = 1883
-    private val COMPANY_CODE = "PK-PUN-SKT-MX01-VT001"
-
-    // SharedPreferences keys (Flutter prefix)
+    // ─── SharedPreferences Keys ───────────────────────────────────────────────
     private val PREFS_NAME              = "FlutterSharedPreferences"
     private val KEY_IS_CLOCKED_IN       = "flutter.isClockedIn"
+    private val KEY_IS_TIMER_FROZEN     = "flutter.is_timer_frozen"
+    private val KEY_ELAPSED_TIME        = "flutter.elapsed_time"
     private val KEY_HAS_CRITICAL_EVENT  = "flutter.has_critical_event_pending"
     private val KEY_EVENT_TIMESTAMP     = "flutter.critical_event_timestamp"
     private val KEY_EVENT_REASON        = "flutter.critical_event_reason"
     private val KEY_EVENT_DISTANCE      = "flutter.critical_event_distance"
     private val KEY_EVENT_LAT           = "flutter.critical_event_latitude"
     private val KEY_EVENT_LNG           = "flutter.critical_event_longitude"
-    private val KEY_IS_TIMER_FROZEN     = "flutter.is_timer_frozen"
-    private val KEY_FROZEN_TIME         = "flutter.frozen_display_time"
-    private val KEY_ELAPSED_TIME        = "flutter.elapsed_time"
     private val KEY_BG_CLOCKOUT_PAYLOAD = "flutter.bg_clockout_payload"
+    private val KEY_FAKE_GPS_DETECTED   = "flutter.fake_gps_detected"
+    private val KEY_LAST_SAVE_WALL_MS   = "flutter.last_location_save_wall_ms"
+    // KEY for wall-clock clock-in time (milliseconds) — written on clock-in
+    private val KEY_CLOCK_IN_WALL_MS    = "flutter.clock_in_wall_ms"
 
-    // Fake GPS Detection
-    private val KEY_FAKE_GPS_DETECTED  = "flutter.fake_gps_detected"
-    private val KEY_FAKE_GPS_REASON    = "System ClockOut - Fake GPS Detected"
-    private val FAKE_GPS_COOLDOWN_MS   = 30_000L
-
-    @Volatile private var lastFakeGpsEventTime = 0L
-    @Volatile private var lastRealLat = 0.0
-    @Volatile private var lastRealLon = 0.0
-
-    private val EXTRA_USER_ID      = "extra_user_id"
-    private val EXTRA_BOOKER_NAME  = "extra_booker_name"
-    private val EXTRA_DESIGNATION  = "extra_designation"
-    private val EXTRA_COMPANY_CODE = "extra_company_code"
-
-    // ─── State ───────────────────────────────────────────────────────────────
-    private lateinit var handler: Handler
-    // ✅ FIX: Old LocationManager + HandlerThread removed — FusedLocationProvider use karo
-    private var fusedClient: FusedLocationProviderClient? = null
-    private var fusedCallback: LocationCallback? = null
-
-    private var checkRunnable:         CheckRunnable?        = null
-    private var mqttPublishRunnable:   MqttPublishRunnable?  = null
-    private var mqttReconnectRunnable: Runnable?             = null
-    private var locationPostRunnable:  LocationPostRunnable? = null
-
-    private val mqttExecutor = Executors.newSingleThreadExecutor { r ->
-        Thread(r, "MqttWorkerThread").apply { isDaemon = true }
-    }
-
-    @Volatile private var isDestroyed     = false
-    @Volatile private var isMqttConnected = false
-
-    private var wasLocationEnabled   = true
-    private var wasPermissionGranted = true
-    private var isClockedIn          = false
-    private var lastEventTime: Long  = 0
-    private var lastEventReason      = ""
-    private var serviceStartTime: Date = Date()
-
-    // ✅ FIX: wakeLock sirf safety net — onCreate mein acquire NAHI karo
-    // postLocationToServer() mein on-demand acquire/release hoga
-    private var wakeLock: PowerManager.WakeLock? = null
-
-    // CPU WakeLock for heartbeat (short-lived, 10s max)
-    private var cpuWakeLock: PowerManager.WakeLock? = null
-    private var heartbeatRunnable: Runnable? = null
-    private var lastSuccessfulPostTime = 0L
-
-    private var workingTimerRunnable: Runnable? = null
-    private var workingSeconds = 0L
-
-    // Identity
-    private var userId      = ""
-    private var bookerName  = ""
-    private var designation = ""
-    private var companyCode = ""
-
-    // Location
-    @Volatile private var lastLat      = 0.0
-    @Volatile private var lastLon      = 0.0
-    @Volatile private var lastSavedLat  = 0.0
-    @Volatile private var lastSavedLon  = 0.0
-    @Volatile private var lastSavedTime = 0L
-    private val recentFixes = ArrayDeque<Location>(3)
-    @Volatile private var lastAccuracy = 0f
-    @Volatile private var lastSpeed    = 0f
-    private var lastHeartbeatTime: Long = 0
-
-    // Dynamic GPS Policy
-    @Volatile private var gpsPolicy: GpsPolicy = GpsPolicy(
-        locationIntervalSec = 60L,
-        gpsAccuracy         = "high"
-    )
-    private var policyRefreshRunnable: Runnable? = null
-
-    // HTTP post loop
-    @Volatile private var httpPostAnchorMs = 0L
-    private var httpPostRunnable: Runnable? = null
-
-    // MQTT
-    private var mqttClient: MqttClient? = null
-    private var mqttPublishCount = 0
-    private val mqttTopic get() = "gps/$companyCode/$userId"
-
-    // AppOps
-    private var appOpsManager: AppOpsManager? = null
-    private var appOpsCallback: AppOpsManager.OnOpChangedListener? = null
-
-    // Network connectivity
-    private var connectivityManager: ConnectivityManager? = null
-    private var networkCallback: ConnectivityManager.NetworkCallback? = null
-
-    // ─── Named inner Runnables ────────────────────────────────────────────────
-
-    inner class CheckRunnable : Runnable {
-        override fun run() {
-            if (isDestroyed) return
-            checkLocationAndPermission()
-            handler.postDelayed(this, CHECK_INTERVAL)  // 30s interval
-        }
-    }
-
-    inner class MqttPublishRunnable : Runnable {
-        override fun run() {
-            if (isDestroyed) return
-            publishLocationToMqtt()
-            handler.postDelayed(this, MQTT_PUBLISH_INTERVAL)  // 60s interval
-        }
-    }
-
-    inner class LocationPostRunnable : Runnable {
-        override fun run() {
-            if (isDestroyed) return
-            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            if (prefs.getBoolean(KEY_IS_CLOCKED_IN, false) &&
-                !prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)) {
-                mqttExecutor.submit { postLocationToServer(prefs) }
-            }
-            if (!isDestroyed) handler.postDelayed(this, 2 * 60_000L)
-        }
-    }
-
-    // ─── Companion ────────────────────────────────────────────────────────────
     companion object {
-        @Volatile
-        var isRunning = false
+        const val EXTRA_USER_ID      = "extra_user_id"
+        const val EXTRA_BOOKER_NAME  = "extra_booker_name"
+        const val EXTRA_DESIGNATION  = "extra_designation"
+        const val EXTRA_COMPANY_CODE = "extra_company_code"
+
+        @Volatile var isRunning = false
             private set
 
         fun start(
             context: Context,
-            userId: String = "",
-            bookerName: String = "",
+            userId: String      = "",
+            bookerName: String  = "",
             designation: String = "",
             companyCode: String = ""
         ) {
             val intent = Intent(context, LocationMonitorService::class.java).apply {
-                putExtra("extra_user_id",      userId)
-                putExtra("extra_booker_name",  bookerName)
-                putExtra("extra_designation",  designation)
-                putExtra("extra_company_code", companyCode)
+                putExtra(EXTRA_USER_ID,      userId)
+                putExtra(EXTRA_BOOKER_NAME,  bookerName)
+                putExtra(EXTRA_DESIGNATION,  designation)
+                putExtra(EXTRA_COMPANY_CODE, companyCode)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
                 context.startForegroundService(intent)
@@ -246,6 +1314,70 @@ class LocationMonitorService : Service() {
         }
     }
 
+    // ─── State ────────────────────────────────────────────────────────────────
+    private lateinit var handler: Handler
+    private val ioExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "LocationIOThread").apply { isDaemon = true }
+    }
+
+    @Volatile private var foregroundStarted = false
+    @Volatile private var isDestroyed       = false
+    @Volatile private var isMqttConnected   = false
+    // TIMER FIX: guard so timer starts only once per service instance
+    @Volatile private var timerStarted      = false
+
+    private var userId      = ""
+    private var bookerName  = ""
+    private var designation = ""
+    private var companyCode = ""
+
+    @Volatile private var lastLat      = 0.0
+    @Volatile private var lastLon      = 0.0
+    @Volatile private var lastAccuracy = 0f
+    @Volatile private var lastSpeed    = 0f
+    @Volatile private var lastRealLat  = 0.0
+    @Volatile private var lastRealLon  = 0.0
+
+    private var gpsLocationManager: LocationManager? = null
+    private var gpsLocationListener: LocationListener? = null
+
+    @Volatile private var gpsPolicy: GpsPolicy = GpsPolicy(60L, "high")
+
+    // TIMER FIX: no more workingSeconds — use wall clock instead
+    private var clockInWallMs          = 0L
+    private var workingTimerRunnable:  Runnable? = null
+
+    // ── Persistent WakeLock — 12-hour timeout ────────────────────────────────
+    // PARTIAL_WAKE_LOCK: screen can turn off but CPU stays on → GPS + DB writes work.
+    // Acquired in onStartCommand (after startForeground), released in onDestroy.
+    // 12-hour timeout = maximum shift length. START_STICKY restart re-acquires it
+    // automatically if the service outlives a single shift (overnight edge case).
+    private var persistentWakeLock: PowerManager.WakeLock? = null
+
+    private var mqttClient:            MqttClient? = null
+    private var mqttPublishRunnable:   Runnable?   = null
+    private var mqttReconnectRunnable: Runnable?   = null
+    private var mqttPublishCount = 0
+
+    private var wasLocationEnabled   = true
+    private var wasPermissionGranted = true
+    private var lastEventTime: Long  = 0
+    private var lastEventReason      = ""
+
+    private val PREF_SAVE_ANCHOR_WALL  = "flutter.location_save_anchor_wall_ms"
+    private var saveAnchorMs           = 0L
+    private var locationSaveRunnable:  Runnable? = null
+    private var policyRefreshRunnable: Runnable? = null
+    private var checkRunnable:         Runnable? = null
+
+    private var connectivityManager: ConnectivityManager? = null
+    private var networkCallback:     ConnectivityManager.NetworkCallback? = null
+
+    private val nativeDb: NativeDBHelper by lazy { NativeDBHelper(applicationContext) }
+
+    private val FAKE_GPS_COOLDOWN_MS     = 30_000L
+    @Volatile private var lastFakeGpsEventTime = 0L
+
     // ═════════════════════════════════════════════════════════════════════════
     // Lifecycle
     // ═════════════════════════════════════════════════════════════════════════
@@ -253,107 +1385,71 @@ class LocationMonitorService : Service() {
     override fun onCreate() {
         super.onCreate()
         isRunning = true
-
-        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putBoolean(KEY_KOTLIN_MASTER, true)
-            .apply()
-
-        handler = Handler(Looper.getMainLooper())
-
-        // ✅ FIX: WakeLock sirf initialize karo — acquire NAHI karo
-        // Permanent WakeLock = lagatar heat + battery drain
-        // Ab GPS save karte waqt on-demand acquire hoga (postLocationToServer mein)
-        // Yeh 1-hour safety net hai — agar koi edge case ho to bhi service survive kare
-        try {
-            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-            wakeLock = pm.newWakeLock(
-                PowerManager.PARTIAL_WAKE_LOCK,
-                "BookIT::LocationServiceWakeLock"
-            )
-            // ✅ FIX: wakeLock?.acquire() HATA DIYA — on-demand acquire use hoga
-            debugPrint("✅ [Service] WakeLock initialized (NOT acquired — on-demand mode)")
-        } catch (e: Exception) {
-            debugPrint("⚠️ [Service] WakeLock init failed: ${e.message}")
-        }
-
+        handler   = Handler(Looper.getMainLooper())
         registerReceivers()
-        registerAppOpsListener()
         registerNetworkCallback()
-        debugPrint("✅ [Service] onCreate complete — Kotlin is master")
+        log("✅ [Service] onCreate")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        createNotificationChannel()
-        serviceStartTime = Date()
+        createNotificationChannels()
 
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                startForeground(
-                    NOTIFICATION_ID,
-                    buildNotification(),
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
-                )
-            } else {
-                startForeground(NOTIFICATION_ID, buildNotification())
+        // startForeground() ONCE — must happen within 5s of startForegroundService()
+        if (!foregroundStarted) {
+            foregroundStarted = true
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    startForeground(NOTIFICATION_ID, buildServiceNotification("⏳ Starting…"),
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
+                } else {
+                    startForeground(NOTIFICATION_ID, buildServiceNotification("⏳ Starting…"))
+                }
+            } catch (e: Exception) {
+                log("❌ [Service] startForeground failed: ${e.message}")
+                isRunning = false
+                stopSelf()
+                return START_NOT_STICKY
             }
-        } catch (e: Exception) {
-            debugPrint("⚠️ [Service] startForeground failed: ${e.message}")
-            stopSelf()
-            return START_NOT_STICKY
+            // ── Acquire persistent WakeLock right after startForeground ────────
+            // Must happen here (not in onCreate) so it's re-acquired on each
+            // START_STICKY restart, keeping the CPU awake for GPS + DB writes.
+            acquirePersistentWakeLock()
         }
 
-        wasLocationEnabled   = isLocationEnabled()
-        wasPermissionGranted = checkLocationPermission()
-
-        val prefs     = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val clockedIn = prefs.getBoolean(KEY_IS_CLOCKED_IN, false)
-        val isFrozen  = prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)
-
-        lastSavedLat  = prefs.getFloat("flutter.lastSavedLat",  0f).toDouble()
-        lastSavedLon  = prefs.getFloat("flutter.lastSavedLon",  0f).toDouble()
-        lastSavedTime = prefs.getLong("flutter.lastSavedTime", 0L)
-
-        if (lastSavedLat != 0.0 || lastSavedLon != 0.0) {
-            lastLat = lastSavedLat
-            lastLon = lastSavedLon
-            debugPrint("📍 [Service] lastLat/Lon pre-filled from prefs: $lastLat, $lastLon")
-        }
-
+        // Resolve identity
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val intentUserId = intent?.getStringExtra(EXTRA_USER_ID)?.takeIf { it.isNotEmpty() }
         if (intentUserId != null) {
             userId      = intentUserId
             bookerName  = intent.getStringExtra(EXTRA_BOOKER_NAME)  ?: ""
             designation = intent.getStringExtra(EXTRA_DESIGNATION)   ?: ""
             companyCode = intent.getStringExtra(EXTRA_COMPANY_CODE)
-                ?.takeIf { it.isNotEmpty() } ?: COMPANY_CODE
+                ?.takeIf { it.isNotEmpty() } ?: DEFAULT_COMPANY_CODE
             prefs.edit()
                 .putString("flutter.userId",          userId)
                 .putString("flutter.userName",        bookerName)
                 .putString("flutter.userDesignation", designation)
                 .putString("flutter.companyCode",     companyCode)
-                .apply()
-            debugPrint("👤 [Service] Identity from Intent → userId=$userId")
+                .commit()
         } else {
-            userId      = getStringPref(prefs, "flutter.userId", "userId")
-            bookerName  = getStringPref(prefs, "flutter.userName", "userName", "booker_name")
-            designation = getStringPref(prefs, "flutter.userDesignation", "userDesignation", "designation")
-            companyCode = prefs.getString("flutter.companyCode", "")
-                ?.takeIf { it.isNotEmpty() } ?: COMPANY_CODE
-            debugPrint("👤 [Service] Identity from prefs → userId=$userId")
+            userId      = prefs.getString("flutter.userId",          "") ?: ""
+            bookerName  = prefs.getString("flutter.userName",        "") ?: ""
+            designation = prefs.getString("flutter.userDesignation", "") ?: ""
+            companyCode = (prefs.getString("flutter.companyCode",    "") ?: "")
+                .ifEmpty { DEFAULT_COMPANY_CODE }
         }
 
-        // ✅ FIX: Guard against empty userId on cold restart after app kill.
-        // When Android restarts a START_STICKY service with a null intent, prefs may not
-        // yet be flushed (race condition on slow/OEM devices). If userId is still empty,
-        // stop the service instead of running zombie (posting empty rows to the server).
-        // The 2-min heartbeat alarm (BulkPostingScheduler) will retry the restart once
-        // prefs are available — this is safe and prevents corrupted location records.
-        if (userId.isEmpty() && clockedIn) {
-            debugPrint("❌ [Service] userId empty after identity resolution — stopping self (heartbeat will retry in 2min)")
+        if (userId.isEmpty()) {
+            log("❌ [Service] userId empty — stopSelf")
             stopSelf()
             return START_NOT_STICKY
         }
+
+        val clockedIn = prefs.getBoolean(KEY_IS_CLOCKED_IN, false)
+        val isFrozen  = prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)
+
+        wasPermissionGranted = checkLocationPermission()
+        wasLocationEnabled   = isLocationEnabled()
 
         if (clockedIn && !isFrozen) {
             if (!wasPermissionGranted) {
@@ -366,55 +1462,123 @@ class LocationMonitorService : Service() {
             }
         }
 
+        // ── TIMER FIX: resolve clockInWallMs from prefs ───────────────────────
+        // Priority 1: flutter.clock_in_wall_ms (most accurate, set below)
+        // Priority 2: flutter.clockInTime ISO string (set by Flutter on clock-in)
+        // Priority 3: now (fallback — timer starts from 0)
+        //
+        // CRITICAL: Always try to write clock_in_wall_ms from clockInTime if not
+        // already present. This ensures the timer survives service kill/restart
+        // even if Flutter never explicitly wrote clock_in_wall_ms.
         if (clockedIn && !isFrozen) {
-            val clockInTimeStr = prefs.getString("flutter.clockInTime", "") ?: ""
-            if (clockInTimeStr.isNotEmpty()) {
-                try {
-                    val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault())
-                    val clockInDate = sdf.parse(clockInTimeStr)
-                    if (clockInDate != null) {
-                        workingSeconds = (System.currentTimeMillis() - clockInDate.time) / 1000
-                        if (workingSeconds < 0) workingSeconds = 0
-                        debugPrint("⏱️ [Timer] Restored workingSeconds=$workingSeconds from clockInTime=$clockInTimeStr")
+            val savedWallMs = prefs.getLong(KEY_CLOCK_IN_WALL_MS, 0L)
+            if (savedWallMs > 0L) {
+                clockInWallMs = savedWallMs
+                log("⏱️ [Timer] Restored wall-ms: $clockInWallMs → ${(System.currentTimeMillis() - clockInWallMs) / 1000}s elapsed")
+            } else {
+                // Try parsing ISO clockInTime from Flutter
+                val clockInStr = prefs.getString("flutter.clockInTime", "") ?: ""
+                val parsed = tryParseClockInTime(clockInStr)
+                clockInWallMs = if (parsed > 0L) {
+                    // Save it as wall-ms so we don't parse again on next restart
+                    prefs.edit().putLong(KEY_CLOCK_IN_WALL_MS, parsed).commit()
+                    log("⏱️ [Timer] Parsed clockInTime: $clockInStr → ${(System.currentTimeMillis() - parsed) / 1000}s elapsed")
+                    parsed
+                } else {
+                    // Fallback: check if elapsed_time string gives us a clue
+                    // e.g. "01:23:45" → subtract that from now to reconstruct clockInTime
+                    val elapsedStr = prefs.getString(KEY_ELAPSED_TIME, "") ?: ""
+                    val elapsedSec = parseElapsedToSeconds(elapsedStr)
+                    if (elapsedSec > 0L) {
+                        val reconstructed = System.currentTimeMillis() - (elapsedSec * 1000L)
+                        prefs.edit().putLong(KEY_CLOCK_IN_WALL_MS, reconstructed).commit()
+                        log("⏱️ [Timer] Reconstructed from elapsed_time '$elapsedStr' → ${elapsedSec}s ago")
+                        reconstructed
+                    } else {
+                        // True fallback — treat as clocked in just now
+                        val now = System.currentTimeMillis()
+                        prefs.edit().putLong(KEY_CLOCK_IN_WALL_MS, now).commit()
+                        log("⚠️ [Timer] Could not parse clockInTime — starting from 0")
+                        now
                     }
-                } catch (e: Exception) {
-                    workingSeconds = 0
-                    debugPrint("⚠️ [Timer] clockInTime parse failed: ${e.message}")
                 }
             }
         }
 
-        startMonitoring()
-
-        if (clockedIn && !isFrozen) {
-            try {
-                WorkManagerBulkPoster.schedule(this)
-            } catch (e: Exception) {
-                debugPrint("⚠️ [Service] WorkManager not available: ${e.message}")
-            }
-            debugPrint("✅ [Service] Backup systems started: WorkManager")
-        }
+        startAllLoops(prefs, resetAnchor = (intent?.action == "ACTION_CLOCK_IN"))
 
         return START_STICKY
     }
 
+    // Parse ISO string "yyyy-MM-dd'T'HH:mm:ss" or "yyyy-MM-dd HH:mm:ss" → epoch ms
+    private fun tryParseClockInTime(str: String): Long {
+        if (str.isEmpty()) return 0L
+        val formats = listOf(
+            "yyyy-MM-dd'T'HH:mm:ss",
+            "yyyy-MM-dd HH:mm:ss",
+            "yyyy-MM-dd'T'HH:mm:ss.SSS"
+        )
+        for (fmt in formats) {
+            try {
+                val d = SimpleDateFormat(fmt, Locale.getDefault()).parse(str)
+                if (d != null) return d.time
+            } catch (_: Exception) {}
+        }
+        return 0L
+    }
+
+    // Parse "HH:mm:ss" elapsed string → total seconds
+    // Used to reconstruct clockInWallMs when clock_in_wall_ms pref is missing
+    private fun parseElapsedToSeconds(str: String): Long {
+        if (str.isEmpty()) return 0L
+        return try {
+            val parts = str.split(":")
+            if (parts.size == 3) {
+                val h = parts[0].toLong()
+                val m = parts[1].toLong()
+                val s = parts[2].toLong()
+                h * 3600L + m * 60L + s
+            } else 0L
+        } catch (_: Exception) { 0L }
+    }
+
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
-        debugPrint("🔄 [Service] App removed from recents — scheduling restart")
-        val prefs     = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val clockedIn = prefs.getBoolean(KEY_IS_CLOCKED_IN, false)
-        val isFrozen  = prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)
-        if (clockedIn && !isFrozen) scheduleServiceRestart()
+        log("🔄 [Service] App removed from recents — scheduling AlarmManager watchdog")
+
+        // START_STICKY alone is often killed by aggressive OEMs (Vivo, Xiaomi, OPPO).
+        // Belt-and-suspenders: also schedule a 5-second AlarmManager wakeup that
+        // fires ServiceRestartReceiver → it checks isClockedIn and restarts service.
+        try {
+            val prefs     = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val clockedIn = prefs.getBoolean(KEY_IS_CLOCKED_IN, false)
+            val isFrozen  = prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)
+            if (!clockedIn || isFrozen) return
+
+            val am = getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
+            val intent = android.content.Intent(this, ServiceRestartReceiver::class.java).apply {
+                action = ServiceRestartReceiver.ACTION_RESTART_SERVICE
+            }
+            val pi = android.app.PendingIntent.getBroadcast(
+                this, 9001, intent,
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+            )
+            val triggerAt = System.currentTimeMillis() + 5_000L
+            when {
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ->
+                    am.setAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP, triggerAt, pi)
+                else -> am.set(android.app.AlarmManager.RTC_WAKEUP, triggerAt, pi)
+            }
+            log("✅ [Service] Watchdog alarm set for +5s")
+        } catch (e: Exception) {
+            log("⚠️ [Service] Watchdog alarm failed: ${e.message}")
+        }
     }
 
     override fun onDestroy() {
-        isDestroyed = true
-        isRunning = false
-
-        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putBoolean(KEY_KOTLIN_MASTER, false)
-            .apply()
+        isDestroyed   = true
+        isRunning     = false
+        timerStarted  = false
 
         val prefs     = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val clockedIn = prefs.getBoolean(KEY_IS_CLOCKED_IN, false)
@@ -424,556 +1588,327 @@ class LocationMonitorService : Service() {
             val permRevoked = !checkLocationPermission()
             val locOff      = !isLocationEnabled()
             if (permRevoked || locOff) {
-                val reason = if (permRevoked)
-                    "System ClockOut - Permission Revoked"
-                else
-                    "System ClockOut - Location Off"
+                val reason = if (permRevoked) "System ClockOut - Permission Revoked"
+                else             "System ClockOut - Location Off"
                 saveCriticalEventToPrefs(prefs, reason)
                 MidnightClockoutReceiver.cancel(this)
-            } else {
-                debugPrint("🔄 [Service] onDestroy while clocked in — scheduling restart")
-                scheduleServiceRestart()
             }
         }
 
         stopAllLoops()
         disconnectMqtt()
-        unregisterAppOpsListener()
         unregisterNetworkCallback()
-
         try { unregisterReceiver(locationModeReceiver)   } catch (_: Exception) {}
-        try { unregisterReceiver(packageReceiver)        } catch (_: Exception) {}
         try { unregisterReceiver(screenReceiver)         } catch (_: Exception) {}
         try { unregisterReceiver(dateTimeChangeReceiver) } catch (_: Exception) {}
+        ioExecutor.shutdown()
 
-        // ✅ FIX: Release wakelocks safely
-        try { if (wakeLock?.isHeld == true) wakeLock?.release() } catch (_: Exception) {}
-        try { if (cpuWakeLock?.isHeld == true) cpuWakeLock?.release() } catch (_: Exception) {}
+        // ── ROOT FIX: Remove BOTH notifications + release WakeLock ───────────
+        // Without stopForeground(), notification 1001 stays stuck in status bar
+        // even after stopService() — this is the "stuck notification" bug.
+        try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) {}
+        try { (getSystemService(NotificationManager::class.java)).cancel(NOTIFICATION_ID) } catch (_: Exception) {}
+        try { (getSystemService(NotificationManager::class.java)).cancel(WORKING_NOTIFICATION_ID) } catch (_: Exception) {}
+        releasePersistentWakeLock()
 
-        mqttExecutor.shutdown()
         super.onDestroy()
-        debugPrint("🛑 [Service] onDestroy complete")
+        log("🛑 [Service] onDestroy")
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     // ═════════════════════════════════════════════════════════════════════════
-    // Monitoring startup
+    // Start / Stop all loops
     // ═════════════════════════════════════════════════════════════════════════
 
-    private fun startMonitoring() {
-        try {
-            val policyFuture = mqttExecutor.submit<GpsPolicy> {
-                GpsPolicyManager.fetchPolicy(this, forceRefresh = true)
-            }
-            gpsPolicy = try {
-                policyFuture.get(5, java.util.concurrent.TimeUnit.SECONDS)
-            } catch (e: java.util.concurrent.TimeoutException) {
-                debugPrint("⚠️ [Policy] Server fetch timed out — using cache/default")
-                GpsPolicyManager.fetchPolicy(this, forceRefresh = false)
-            } catch (e: Exception) {
-                debugPrint("⚠️ [Policy] Fetch error: ${e.message} — using cache/default")
-                GpsPolicyManager.fetchPolicy(this, forceRefresh = false)
-            }
-            debugPrint("✅ [Policy] Startup policy — interval=${gpsPolicy.locationIntervalSec}s accuracy=${gpsPolicy.gpsAccuracy}")
-        } catch (e: Exception) {
-            debugPrint("⚠️ [Policy] startMonitoring policy block failed: ${e.message}")
+    private fun startAllLoops(
+        prefs: android.content.SharedPreferences,
+        resetAnchor: Boolean
+    ) {
+        val clockedIn = prefs.getBoolean(KEY_IS_CLOCKED_IN, false)
+        val isFrozen  = prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)
+
+        // GPS policy fetch (async) → then start GPS + save loop
+        ioExecutor.submit {
+            gpsPolicy = GpsPolicyManager.fetchPolicy(this, forceRefresh = true)
+            log("📋 [Policy] interval=${gpsPolicy.locationIntervalSec}s accuracy=${gpsPolicy.gpsAccuracy}")
+            handler.post { restartGpsAndSaveLoop(resetAnchor) }
         }
 
-        startLocationUpdates()
-
-        checkRunnable = CheckRunnable()
-        handler.post(checkRunnable!!)
+        if (clockedIn && !isFrozen) {
+            // TIMER FIX: only start timer once per service instance
+            if (!timerStarted) {
+                timerStarted = true
+                startWorkingTimer()
+            }
+            MidnightClockoutReceiver.schedule(this)
+            LocationUploadWorker.schedule(this)
+        }
 
         startMqttPublishing()
-
-        debugPrint("✅ [Service] All loops started — interval=${gpsPolicy.locationIntervalSec}s")
-
-        restartHttpPostLoop(resetAnchor = true)
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        if (prefs.getBoolean(KEY_IS_CLOCKED_IN, false) && !prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)) {
-            BulkPostingScheduler.startBulkPostingAlarm(this, resetAnchor = true)
-        }
-
-        startHeartbeat()
-        startWorkingTimer()
-        scheduleKeepAliveAlarm()
-        MidnightClockoutReceiver.schedule(this)
+        startPermissionCheckLoop()
         startPolicyRefreshLoop()
     }
 
-    // ─── GPS Policy ───────────────────────────────────────────────────────────
-
-    private fun loadAndApplyPolicy(forceRefresh: Boolean = false) {
-        val newPolicy = GpsPolicyManager.fetchPolicy(this, forceRefresh)
-        val intervalChanged = newPolicy.locationIntervalSec != gpsPolicy.locationIntervalSec
-        val accuracyChanged = newPolicy.gpsAccuracy        != gpsPolicy.gpsAccuracy
-
-        gpsPolicy = newPolicy
-        debugPrint("📋 [Policy] Applied — interval=${gpsPolicy.locationIntervalSec}s accuracy=${gpsPolicy.gpsAccuracy}")
-
-        if ((accuracyChanged || intervalChanged) && fusedCallback != null) {
-            handler.post {
-                if (!isDestroyed) {
-                    debugPrint("🔄 [Policy] GPS restart — interval=${gpsPolicy.locationIntervalSec}s")
-                    stopLocationUpdates()
-                    startLocationUpdates()
-                }
-            }
-        }
-
-        if (intervalChanged) {
-            debugPrint("🔄 [Policy] Interval → ${newPolicy.locationIntervalSec}s — restarting both systems")
-            handler.post {
-                if (!isDestroyed) {
-                    restartHttpPostLoop(resetAnchor = true)
-                    BulkPostingScheduler.startBulkPostingAlarm(this, resetAnchor = true)
-                }
-            }
-        }
+    private fun stopAllLoops() {
+        checkRunnable?.let        { handler.removeCallbacks(it) }
+        workingTimerRunnable?.let { handler.removeCallbacks(it) }
+        policyRefreshRunnable?.let{ handler.removeCallbacks(it) }
+        locationSaveRunnable?.let { handler.removeCallbacks(it) }
+        mqttPublishRunnable?.let  { handler.removeCallbacks(it) }
+        mqttReconnectRunnable?.let{ handler.removeCallbacks(it) }
+        handler.removeCallbacksAndMessages(null)
+        stopLocationUpdates()
+        try { (getSystemService(NotificationManager::class.java)).cancel(WORKING_NOTIFICATION_ID) } catch (_: Exception) {}
     }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // Working Timer — WALL CLOCK BASED (the real fix)
+    //
+    // Instead of workingSeconds++, we calculate:
+    //   elapsed = (System.currentTimeMillis() - clockInWallMs) / 1000
+    //
+    // This means:
+    //   - Phone sleep/wake → timer picks up exactly where it left off
+    //   - Service restart  → timer picks up exactly where it left off
+    //   - App kill/resume  → timer picks up exactly where it left off
+    //   - No drift, no stuck, no reset
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private fun startWorkingTimer() {
+        workingTimerRunnable?.let { handler.removeCallbacks(it) }
+
+        workingTimerRunnable = object : Runnable {
+            override fun run() {
+                if (isDestroyed) return
+
+                val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                // Stop ticking if clocked out or frozen
+                if (!prefs.getBoolean(KEY_IS_CLOCKED_IN, false) ||
+                    prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)) {
+                    return
+                }
+
+                // WALL CLOCK: always calculate from actual clock-in time
+                val ref = if (clockInWallMs > 0L) clockInWallMs
+                else prefs.getLong(KEY_CLOCK_IN_WALL_MS, System.currentTimeMillis())
+
+                val totalSec = ((System.currentTimeMillis() - ref) / 1000L).coerceAtLeast(0L)
+                val h = totalSec / 3600
+                val m = (totalSec % 3600) / 60
+                val s = totalSec % 60
+                val timeStr = "%02d:%02d:%02d".format(h, m, s)
+
+                updateWorkingTimerNotification(timeStr)
+
+                // Persist for Flutter to read
+                try {
+                    prefs.edit().putString(KEY_ELAPSED_TIME, timeStr).apply()
+                } catch (_: Exception) {}
+
+                // Schedule next tick aligned to next second boundary
+                // This keeps the timer from drifting over time
+                val nowMs     = System.currentTimeMillis()
+                val elapsedMs = nowMs - ref
+                val nextTick  = 1000L - (elapsedMs % 1000L)
+                val delay     = if (nextTick < 50L) nextTick + 1000L else nextTick
+
+                if (!isDestroyed) handler.postDelayed(this, delay)
+            }
+        }
+        handler.post(workingTimerRunnable!!)   // start immediately
+        log("✅ [Timer] Wall-clock timer started — clockInWallMs=$clockInWallMs")
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // GPS Policy
+    // ═════════════════════════════════════════════════════════════════════════
 
     private fun startPolicyRefreshLoop() {
         policyRefreshRunnable = object : Runnable {
             override fun run() {
                 if (isDestroyed) return
-                mqttExecutor.submit { loadAndApplyPolicy(forceRefresh = true) }
-                handler.postDelayed(this, 5 * 60_000L)
+                ioExecutor.submit {
+                    val newPolicy = GpsPolicyManager.fetchPolicy(this@LocationMonitorService, forceRefresh = true)
+                    val changed   = newPolicy.locationIntervalSec != gpsPolicy.locationIntervalSec ||
+                            newPolicy.gpsAccuracy        != gpsPolicy.gpsAccuracy
+                    gpsPolicy = newPolicy
+                    if (changed) {
+                        log("📋 [Policy] Changed → restarting GPS loop")
+                        handler.post { restartGpsAndSaveLoop(resetAnchor = true) }
+                    }
+                }
+                if (!isDestroyed) handler.postDelayed(this, 5 * 60_000L)
             }
         }
         handler.postDelayed(policyRefreshRunnable!!, 5 * 60_000L)
-        debugPrint("✅ [Policy] 5-min refresh loop started")
-    }
-
-    private fun onNetworkRestored() {
-        handler.postDelayed({
-            if (!isDestroyed) {
-                mqttExecutor.submit { loadAndApplyPolicy(forceRefresh = true) }
-                debugPrint("🔄 [Policy] Re-synced after network restore")
-            }
-        }, 5_000L)
-    }
-
-    private fun scheduleKeepAliveAlarm() {
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        if (!prefs.getBoolean(KEY_IS_CLOCKED_IN, false) || prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)) return
-
-        val am = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        val keepAliveIntent = Intent(applicationContext, ServiceRestartReceiver::class.java).apply {
-            action = ServiceRestartReceiver.ACTION_RESTART_SERVICE
-        }
-        val pIntent = PendingIntent.getBroadcast(
-            applicationContext, 99, keepAliveIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        val triggerAt = android.os.SystemClock.elapsedRealtime() + 15 * 60 * 1000L
-        try {
-            when {
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && am.canScheduleExactAlarms() ->
-                    am.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pIntent)
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ->
-                    am.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pIntent)
-                else ->
-                    am.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pIntent)
-            }
-            debugPrint("✅ [KeepAlive] 15-min alarm set")
-        } catch (e: Exception) {
-            debugPrint("⚠️ [KeepAlive] Alarm failed: ${e.message}")
-        }
-    }
-
-    // ─── Heartbeat ────────────────────────────────────────────────────────────
-
-    private fun startHeartbeat() {
-        heartbeatRunnable = object : Runnable {
-            override fun run() {
-                if (isDestroyed) return
-                val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                if (prefs.getBoolean(KEY_IS_CLOCKED_IN, false) &&
-                    !prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)) {
-                    acquireCpuWakeLock()
-                    mqttExecutor.submit {
-                        syncUnpostedRows()
-                        debugPrint("💓 [Heartbeat] Bulk sync executed")
-                    }
-                }
-                if (!isDestroyed) handler.postDelayed(this, 30_000L)
-            }
-        }
-        handler.postDelayed(heartbeatRunnable!!, 30_000L)
-        debugPrint("✅ [Heartbeat] Started (30s interval)")
-    }
-
-    private fun acquireCpuWakeLock() {
-        try {
-            if (cpuWakeLock == null) {
-                val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-                cpuWakeLock = pm.newWakeLock(
-                    PowerManager.PARTIAL_WAKE_LOCK,
-                    "BookIT::CpuHeartbeatLock"
-                )
-            }
-            if (cpuWakeLock?.isHeld != true) {
-                cpuWakeLock?.acquire(10_000L)  // sirf 10s — sync ke liye kaafi
-                debugPrint("✅ [WakeLock] CPU lock acquired (10s)")
-            }
-        } catch (e: Exception) {
-            debugPrint("⚠️ [WakeLock] Failed: ${e.message}")
-        }
-    }
-
-    // ─── HTTP Post Loop ───────────────────────────────────────────────────────
-
-    private fun restartHttpPostLoop(resetAnchor: Boolean = false) {
-        httpPostRunnable?.let { handler.removeCallbacks(it) }
-        httpPostRunnable = null
-
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val nowWall = System.currentTimeMillis()
-
-        if (resetAnchor) {
-            httpPostAnchorMs = nowWall
-            prefs.edit().putLong(PREF_HTTP_POST_ANCHOR_WALL, httpPostAnchorMs).apply()
-            debugPrint("⚓ [HttpLoop] Anchor RESET at $httpPostAnchorMs")
-        } else {
-            val savedWall = prefs.getLong(PREF_HTTP_POST_ANCHOR_WALL, 0L)
-            if (savedWall > 0L && savedWall <= nowWall) {
-                httpPostAnchorMs = savedWall
-                debugPrint("⚓ [HttpLoop] Restored anchor (age=${(nowWall - savedWall) / 1000}s)")
-            } else {
-                httpPostAnchorMs = nowWall
-                prefs.edit().putLong(PREF_HTTP_POST_ANCHOR_WALL, httpPostAnchorMs).apply()
-                debugPrint("⚓ [HttpLoop] No valid anchor — new anchor set")
-            }
-        }
-
-        scheduleNextHttpTick()
-        debugPrint("✅ [HttpLoop] Started — interval=${gpsPolicy.locationIntervalSec}s")
-    }
-
-    private fun scheduleNextHttpTick() {
-        if (isDestroyed) return
-
-        val intervalMs = gpsPolicy.locationIntervalSec * 1000L
-        val now = System.currentTimeMillis()
-
-        var anchor = httpPostAnchorMs
-        if (anchor == 0L) {
-            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            anchor = prefs.getLong(PREF_HTTP_POST_ANCHOR_WALL, 0L)
-            if (anchor == 0L || anchor > now) {
-                anchor = now
-                httpPostAnchorMs = anchor
-                prefs.edit().putLong(PREF_HTTP_POST_ANCHOR_WALL, anchor).apply()
-            } else {
-                httpPostAnchorMs = anchor
-            }
-        }
-
-        val elapsed   = now - anchor
-        val ticksDone = elapsed / intervalMs
-        val nextMs    = (ticksDone + 1) * intervalMs
-        var delayMs   = nextMs - elapsed
-
-        if (delayMs <= 0L) {
-            delayMs = intervalMs - (elapsed % intervalMs)
-            if (delayMs <= 0L) delayMs = 200L
-        }
-
-        debugPrint("⏱️ [HttpLoop] Next tick in ${delayMs / 1000}s")
-
-        httpPostRunnable = Runnable {
-            if (isDestroyed) return@Runnable
-            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            if (prefs.getBoolean(KEY_IS_CLOCKED_IN, false) &&
-                !prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)) {
-                mqttExecutor.submit { postLocationToServer(prefs) }
-            }
-            scheduleNextHttpTick()
-        }
-        handler.postDelayed(httpPostRunnable!!, delayMs)
-    }
-
-    private fun stopAllLoops() {
-        checkRunnable?.let        { handler.removeCallbacks(it) }
-        mqttPublishRunnable?.let  { handler.removeCallbacks(it) }
-        mqttReconnectRunnable?.let{ handler.removeCallbacks(it) }
-        locationPostRunnable?.let { handler.removeCallbacks(it) }
-        heartbeatRunnable?.let    { handler.removeCallbacks(it) }
-        workingTimerRunnable?.let { handler.removeCallbacks(it) }
-        policyRefreshRunnable?.let{ handler.removeCallbacks(it) }
-        httpPostRunnable?.let     { handler.removeCallbacks(it) }
-        try { (getSystemService(NotificationManager::class.java)).cancel(WORKING_NOTIFICATION_ID) } catch (_: Exception) {}
-        handler.removeCallbacksAndMessages(null)
-        stopLocationUpdates()
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    // ✅ FIX: GPS — FusedLocationProvider (Android recommended, battery efficient)
-    // Old: LocationManager (GPS_PROVIDER + NETWORK_PROVIDER dono = double updates)
-    // New: FusedLocationProvider — smart mix, exact interval, PRIORITY_BALANCED = less heat
+    // Native GPS (LocationManager) updates
     // ═════════════════════════════════════════════════════════════════════════
 
     private fun startLocationUpdates() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
-            != PackageManager.PERMISSION_GRANTED &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION)
-            != PackageManager.PERMISSION_GRANTED) return
+        if (!checkLocationPermission()) return
+        if (gpsLocationListener != null) return   // already running
 
         try {
-            if (fusedCallback != null) return  // already running
+            val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+            gpsLocationManager = lm
 
-            fusedClient = LocationServices.getFusedLocationProviderClient(this)
-
-            val intervalMs = gpsPolicy.locationIntervalSec * 1000L
-
-            // ✅ Priority based on policy accuracy setting
-            val priority = when (gpsPolicy.gpsAccuracy) {
-                "best", "high" -> Priority.PRIORITY_HIGH_ACCURACY
-                "medium"       -> Priority.PRIORITY_BALANCED_POWER_ACCURACY
-                "low", "lowest"-> Priority.PRIORITY_LOW_POWER
-                else           -> Priority.PRIORITY_BALANCED_POWER_ACCURACY
+            // Require GPS_PROVIDER — no fused / network fallback
+            if (!lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                log("❌ [GPS] GPS_PROVIDER disabled — skipping startLocationUpdates")
+                return
             }
 
-            val request = LocationRequest.Builder(intervalMs)
-                .setMinUpdateIntervalMillis(intervalMs)        // ✅ OS se pehle update mat do
-                .setMaxUpdateDelayMillis(intervalMs + 5_000L)  // 5s grace period
-                .setPriority(priority)
-                .build()
+            val intervalMs   = gpsPolicy.locationIntervalSec * 1000L
+            val minDistanceM = 0f   // accept every fix regardless of distance moved
 
-            fusedCallback = object : LocationCallback() {
-                override fun onLocationResult(result: LocationResult) {
-                    val loc = result.lastLocation ?: return
+            val maxAccuracy = when (gpsPolicy.gpsAccuracy) {
+                "best"   -> 20f;  "high"   -> 50f
+                "medium" -> 100f; "low"    -> 200f
+                "lowest" -> 500f; else     -> 50f
+            }
 
-                    // ✅ Mock GPS check
-                    if (loc.isFromMockProvider) {
-                        debugPrint("🚨 [GPS] Mock detected @ (${loc.latitude}, ${loc.longitude})")
+            gpsLocationListener = object : LocationListener {
+                override fun onLocationChanged(loc: Location) {
+                    // Reject mock / fake GPS
+                    @Suppress("DEPRECATION")
+                    val isMock = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
+                        loc.isMock
+                    else
+                        loc.isFromMockProvider
+                    if (isMock) {
+                        log("🚨 [GPS] Mock location detected")
                         handleFakeGpsDetected(loc.latitude, loc.longitude)
                         return
                     }
-
                     lastRealLat = loc.latitude
                     lastRealLon = loc.longitude
 
-                    // ✅ Accuracy filter per policy
-                    val maxAccuracy = when (gpsPolicy.gpsAccuracy) {
-                        "best"   -> 20f
-                        "high"   -> 50f
-                        "medium" -> 100f
-                        "low"    -> 200f
-                        "lowest" -> 500f
-                        else     -> 100f
-                    }
+                    // Accuracy filter
                     if (loc.accuracy > maxAccuracy) {
-                        debugPrint("⚠️ [GPS] Low accuracy (${loc.accuracy}m > ${maxAccuracy}m) — skipping")
+                        log("⚠️ [GPS] Skipped low-accuracy: ${loc.accuracy}m (max=${maxAccuracy}m)")
                         return
                     }
+                    lastLat      = loc.latitude
+                    lastLon      = loc.longitude
+                    lastAccuracy = loc.accuracy
+                    lastSpeed    = loc.speed
+                }
 
-                    // Weighted smoothing
-                    synchronized(recentFixes) {
-                        if (recentFixes.size >= 3) recentFixes.removeFirst()
-                        recentFixes.addLast(loc)
+                @Deprecated("Deprecated in API 29")
+                override fun onStatusChanged(provider: String?, status: Int, extras: android.os.Bundle?) {}
+
+                override fun onProviderEnabled(provider: String) {
+                    log("✅ [GPS] Provider enabled: $provider")
+                }
+
+                override fun onProviderDisabled(provider: String) {
+                    log("⚠️ [GPS] Provider disabled: $provider")
+                    if (provider == LocationManager.GPS_PROVIDER) {
+                        // GPS turned off — trigger critical event (same as FusedLocation path)
+                        handler.post { checkPermissionsAndLocation() }
                     }
-                    val fixes  = synchronized(recentFixes) { recentFixes.toList() }
-                    val totalW = fixes.sumOf { 1.0 / it.accuracy }
-                    val smoothLat = fixes.sumOf { (1.0 / it.accuracy) * it.latitude  } / totalW
-                    val smoothLon = fixes.sumOf { (1.0 / it.accuracy) * it.longitude } / totalW
-
-                    lastLat           = smoothLat
-                    lastLon           = smoothLon
-                    lastAccuracy      = loc.accuracy
-                    lastSpeed         = loc.speed
-                    lastHeartbeatTime = System.currentTimeMillis()
-
-                    debugPrint("📍 [GPS] Fix: lat=$smoothLat lon=$smoothLon acc=${loc.accuracy}m")
                 }
             }
 
-            fusedClient?.requestLocationUpdates(
-                request,
-                fusedCallback!!,
+            lm.requestLocationUpdates(
+                LocationManager.GPS_PROVIDER,
+                intervalMs,
+                minDistanceM,
+                gpsLocationListener!!,
                 Looper.getMainLooper()
             )
-
-            debugPrint("✅ [GPS] FusedLocation started — interval=${gpsPolicy.locationIntervalSec}s priority=${priority}")
+            log("✅ [GPS] Native GPS_PROVIDER started — interval=${gpsPolicy.locationIntervalSec}s accuracy=$maxAccuracy m")
         } catch (e: Exception) {
-            debugPrint("⚠️ [GPS] FusedLocation failed: ${e.message}")
+            log("❌ [GPS] startLocationUpdates failed: ${e.message}")
         }
     }
 
     private fun stopLocationUpdates() {
         try {
-            fusedCallback?.let { fusedClient?.removeLocationUpdates(it) }
+            gpsLocationListener?.let { gpsLocationManager?.removeUpdates(it) }
         } catch (_: Exception) {}
-        fusedCallback = null
-        fusedClient   = null
-        debugPrint("🛑 [GPS] FusedLocation stopped")
+        gpsLocationListener = null
+        gpsLocationManager  = null
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
-    // MQTT
-    // ═════════════════════════════════════════════════════════════════════════
-
-    private fun connectMqtt() {
-        if (isMqttConnected) return
-        mqttExecutor.submit {
-            if (isDestroyed || isMqttConnected) return@submit
-            try {
-                val clientId = "android_${userId}_${System.currentTimeMillis()}"
-                val client   = MqttClient("tcp://$MQTT_HOST:$MQTT_PORT", clientId, MemoryPersistence())
-                val opts = MqttConnectOptions().apply {
-                    isCleanSession       = true
-                    connectionTimeout    = 10
-                    keepAliveInterval    = 30
-                    isAutomaticReconnect = false
-                }
-                client.setCallback(object : MqttCallback {
-                    override fun connectionLost(cause: Throwable?) {
-                        isMqttConnected = false
-                        handler.post { scheduleReconnect() }
-                    }
-                    override fun messageArrived(topic: String?, msg: MqttMessage?) {}
-                    override fun deliveryComplete(token: IMqttDeliveryToken?) {}
-                })
-                client.connect(opts)
-                mqttClient      = client
-                isMqttConnected = true
-                handler.post { updateNotification("✅ MQTT connected — tracking active", false) }
-                debugPrint("✅ [MQTT] Connected → tcp://$MQTT_HOST:$MQTT_PORT")
-            } catch (e: Exception) {
-                isMqttConnected = false
-                handler.post { scheduleReconnect() }
-                debugPrint("❌ [MQTT] Connect failed: ${e.message}")
-            }
-        }
-    }
-
-    private fun disconnectMqtt() {
-        mqttReconnectRunnable?.let { handler.removeCallbacks(it) }
-        mqttReconnectRunnable = null
-        mqttPublishRunnable?.let { handler.removeCallbacks(it) }
-        mqttPublishRunnable = null
-        mqttExecutor.submit {
-            try { if (mqttClient?.isConnected == true) mqttClient?.disconnect(0) } catch (_: Exception) {}
-            mqttClient      = null
-            isMqttConnected = false
-        }
-    }
-
-    private fun scheduleReconnect() {
+    private fun restartGpsAndSaveLoop(resetAnchor: Boolean) {
         if (isDestroyed) return
-        mqttReconnectRunnable?.let { handler.removeCallbacks(it) }
-        mqttReconnectRunnable = Runnable {
-            if (!isDestroyed && !isMqttConnected) connectMqtt()
-        }
-        handler.postDelayed(mqttReconnectRunnable!!, MQTT_RECONNECT_DELAY)
+        stopLocationUpdates()
+        startLocationUpdates()
+        scheduleLocationSave(resetAnchor)
     }
 
-    private fun publishLocationToMqtt() {
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        if (!prefs.getBoolean(KEY_IS_CLOCKED_IN, false)) return
-        if (prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)) return
-        if (lastLat == 0.0 && lastLon == 0.0) {
-            updateNotification("⏳ Waiting for GPS fix…", false)
-            return
-        }
+    // ═════════════════════════════════════════════════════════════════════════
+    // Location Save — Anchor-Based Precise Scheduling
+    // ═════════════════════════════════════════════════════════════════════════
 
-        val payload = JSONObject().apply {
-            put("device_id",    userId)
-            put("company_code", companyCode.ifEmpty { COMPANY_CODE })
-            put("emp_name",     bookerName)
-            put("dept_id",      designation)
-            put("lat",          lastLat)
-            put("lon",          lastLon)
-            put("accuracy",     lastAccuracy)
-            put("speed",        lastSpeed)
-            put("track_id",     System.currentTimeMillis())
-            put("timestamp",    SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault()).format(Date()))
-            put("source",       "android_background_service")
-        }.toString()
+    private fun scheduleLocationSave(resetAnchor: Boolean = false) {
+        locationSaveRunnable?.let { handler.removeCallbacks(it) }
+        locationSaveRunnable = null
 
-        mqttExecutor.submit {
-            try {
-                val client = mqttClient
-                if (!isMqttConnected || client == null || !client.isConnected) {
-                    handler.post { scheduleReconnect() }
-                    return@submit
-                }
-                val msg = MqttMessage(payload.toByteArray(Charsets.UTF_8)).apply {
-                    qos        = 1
-                    isRetained = false
-                }
-                client.publish(mqttTopic, msg)
-                mqttPublishCount++
-                handler.post { updateNotification("✅ Live tracking • #$mqttPublishCount sent", false) }
-                debugPrint("✅ [MQTT] #$mqttPublishCount published")
-            } catch (e: Exception) {
-                isMqttConnected = false
-                handler.post { scheduleReconnect() }
+        val prefs      = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val nowWall    = System.currentTimeMillis()
+        val intervalMs = gpsPolicy.locationIntervalSec * 1000L
+
+        if (resetAnchor) {
+            saveAnchorMs = nowWall
+            prefs.edit().putLong(PREF_SAVE_ANCHOR_WALL, saveAnchorMs).apply()
+            log("⚓ [SaveLoop] Anchor RESET at $saveAnchorMs")
+        } else {
+            val stored = prefs.getLong(PREF_SAVE_ANCHOR_WALL, 0L)
+            saveAnchorMs = if (stored > 0L && stored <= nowWall) stored else {
+                nowWall.also { prefs.edit().putLong(PREF_SAVE_ANCHOR_WALL, it).apply() }
             }
         }
+        scheduleNextSaveTick()
     }
 
-    private fun startMqttPublishing() {
-        connectMqtt()
-        mqttPublishRunnable?.let { handler.removeCallbacks(it) }
-        mqttPublishRunnable = MqttPublishRunnable()
-        handler.postDelayed(mqttPublishRunnable!!, MQTT_PUBLISH_INTERVAL)
-        debugPrint("✅ [MQTT] 60-second publish loop started")
+    private fun scheduleNextSaveTick() {
+        if (isDestroyed) return
+
+        val intervalMs = gpsPolicy.locationIntervalSec * 1000L
+        val nowWall    = System.currentTimeMillis()
+        val elapsed    = nowWall - saveAnchorMs
+        val ticksDone  = elapsed / intervalMs
+        val nextWall   = saveAnchorMs + (ticksDone + 1) * intervalMs
+        var delayMs    = nextWall - nowWall
+        if (delayMs <= 0L) delayMs = intervalMs
+
+        log("⏱️ [SaveLoop] Next save in ${delayMs / 1000}s (interval=${intervalMs / 1000}s)")
+
+        locationSaveRunnable = Runnable {
+            if (isDestroyed) return@Runnable
+            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            if (prefs.getBoolean(KEY_IS_CLOCKED_IN, false) &&
+                !prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)) {
+                ioExecutor.submit { saveLocationToDB(prefs) }
+            }
+            scheduleNextSaveTick()
+        }
+        handler.postDelayed(locationSaveRunnable!!, delayMs)
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
-    // ✅ FIX: HTTP POST — On-demand WakeLock + Hard Time Gate
-    // WakeLock: sirf GPS save karte waqt acquire karo, phir release karo
-    // Time Gate: policy interval se pehle koi save nahi hoga (spurious update block)
-    // ═════════════════════════════════════════════════════════════════════════
-
-    private val nativeDb: NativeDBHelper by lazy { NativeDBHelper(applicationContext) }
-
-    private fun postLocationToServer(prefs: android.content.SharedPreferences) {
+    private fun saveLocationToDB(prefs: android.content.SharedPreferences) {
         val lat = lastLat
         val lon = lastLon
         if (lat == 0.0 && lon == 0.0) {
-            debugPrint("⚠️ [HTTP] No GPS fix — skipping save")
+            log("⚠️ [SaveLoop] No GPS fix yet — skipping")
             return
         }
-
-        // ✅ HARD TIME GATE — policy interval se pehle save nahi hoga
-        val nowMs = System.currentTimeMillis()
-        val minIntervalMs = gpsPolicy.locationIntervalSec * 1000L
-        if (lastSavedTime > 0 && (nowMs - lastSavedTime) < minIntervalMs) {
-            val waitSec = (minIntervalMs - (nowMs - lastSavedTime)) / 1000
-            debugPrint("⏭️ [HTTP] Too soon — skipping (${waitSec}s remaining)")
-            return
-        }
-
-        // ✅ ON-DEMAND WAKELOCK — sirf save karte waqt CPU jagao
-        // 30s kaafi hai: DB write + network sync complete ho jaata hai
-        val gpsWl = try {
-            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-            pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "BookIT::GpsSaveLock").also {
-                it.acquire(30_000L)
-                debugPrint("✅ [WakeLock] GPS save lock acquired (30s)")
-            }
-        } catch (e: Exception) {
-            debugPrint("⚠️ [WakeLock] GPS save lock failed: ${e.message}")
-            null
-        }
-
+        val wl = acquireShortWakeLock("BookIT::DbWriteLock", 15_000L)
         try {
-            if (lat > 90.0 || lat < -90.0 || lon > 180.0 || lon < -180.0) {
-                debugPrint("⚠️ [HTTP] Invalid coordinates — skipping")
-                return
-            }
-
+            val now  = Date()
             val sdf  = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
             val stf  = SimpleDateFormat("HH:mm:ss",   Locale.getDefault())
-            val now  = Date()
-            val rowId = "LT-$userId-${SimpleDateFormat("dd", Locale.getDefault()).format(now)}" +
-                    "-${SimpleDateFormat("MMM", Locale.getDefault()).format(now)}" +
+            val ddf  = SimpleDateFormat("dd",          Locale.getDefault())
+            val mdf  = SimpleDateFormat("MMM",         Locale.getDefault())
+            val rowId = "LT-$userId-${ddf.format(now)}-${mdf.format(now)}" +
                     "-${UUID.randomUUID().toString().takeLast(6).uppercase()}"
-            val code = companyCode.ifEmpty { COMPANY_CODE }
-
+            val code = companyCode.ifEmpty { DEFAULT_COMPANY_CODE }
             nativeDb.insertLocationRow(
                 id          = rowId,
                 date        = sdf.format(now),
@@ -985,149 +1920,164 @@ class LocationMonitorService : Service() {
                 designation = designation,
                 companyCode = code
             )
-            debugPrint("💾 [HTTP] Saved: $rowId  lat=$lat lng=$lon")
-
-            lastSavedLat  = lat
-            lastSavedLon  = lon
-            lastSavedTime = nowMs
-            getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
-                .putFloat("flutter.lastSavedLat",  lat.toFloat())
-                .putFloat("flutter.lastSavedLon",  lon.toFloat())
-                .putLong("flutter.lastSavedTime",  lastSavedTime)
-                .apply()
-
-            syncUnpostedRows()
-
+            prefs.edit().putLong(KEY_LAST_SAVE_WALL_MS, System.currentTimeMillis()).apply()
+            log("💾 [SaveLoop] Saved: $rowId lat=$lat lng=$lon")
         } catch (e: Exception) {
-            debugPrint("❌ [HTTP] Save failed: ${e.message}")
+            log("❌ [SaveLoop] DB save failed: ${e.message}")
         } finally {
-            // ✅ WakeLock release — CPU ab so sakta hai
-            try {
-                if (gpsWl?.isHeld == true) {
-                    gpsWl.release()
-                    debugPrint("✅ [WakeLock] GPS save lock released")
-                }
-            } catch (_: Exception) {}
-        }
-    }
-
-    private fun syncUnpostedRows() {
-        val BULK_API = "http://119.153.102.7:8001/location/bulk"
-
-        val unposted = try { nativeDb.getUnpostedRows() } catch (e: Exception) {
-            debugPrint("❌ [HTTP] DB read failed: ${e.message}")
-            return
-        }
-
-        if (unposted.isEmpty()) {
-            debugPrint("✅ [HTTP] No unposted rows")
-            return
-        }
-
-        debugPrint("🚀 [HTTP] Syncing ${unposted.size} rows → $BULK_API")
-
-        val records = JSONArray()
-        for (row in unposted) {
-            records.put(JSONObject().apply {
-                put("locationtracking_date", row["locationtracking_date"] ?: "")
-                put("locationtracking_time", row["locationtracking_time"] ?: "")
-                put("user_id",              row["user_id"] ?: "")
-                put("company_code",         row["company_code"] ?: "")
-                put("lat_in",               (row["lat_in"] ?: "0").toDoubleOrNull() ?: 0.0)
-                put("lng_in",               (row["lng_in"] ?: "0").toDoubleOrNull() ?: 0.0)
-                put("booker_name",          row["booker_name"] ?: "")
-                put("designation",          row["designation"] ?: "")
-                put("posted",               false)
-            })
-        }
-
-        try {
-            val conn = URL(BULK_API).openConnection() as HttpURLConnection
-            conn.apply {
-                requestMethod  = "POST"
-                connectTimeout = 15_000
-                readTimeout    = 30_000
-                doOutput       = true
-                setRequestProperty("Content-Type", "application/json")
-                setRequestProperty("Accept",       "application/json")
-            }
-            OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use {
-                it.write(JSONObject().put("records", records).toString())
-            }
-            val code = conn.responseCode
-            conn.disconnect()
-
-            if (code in 200..299) {
-                val ids = unposted.mapNotNull { it["locationtracking_id"] }
-                nativeDb.markPosted(ids)
-                debugPrint("✅ [HTTP] Bulk OK ($code) — marked ${ids.size} rows posted")
-            } else {
-                debugPrint("⚠️ [HTTP] Bulk failed ($code) — retry next tick")
-            }
-        } catch (e: Exception) {
-            debugPrint("📴 [HTTP] Bulk exception: ${e.message} — will retry")
+            releaseWakeLock(wl)
         }
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    // Service restart
+    // MQTT
     // ═════════════════════════════════════════════════════════════════════════
 
-    private fun scheduleServiceRestart() {
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        if (userId.isNotEmpty()) {
-            prefs.edit()
-                .putString("flutter.userId",          userId)
-                .putString("flutter.userName",        bookerName)
-                .putString("flutter.userDesignation", designation)
-                .putString("flutter.companyCode",     companyCode)
-                .apply()
-        }
-
-        try {
-            val directIntent = Intent(applicationContext, LocationMonitorService::class.java).apply {
-                putExtra("extra_user_id",      userId)
-                putExtra("extra_booker_name",  bookerName)
-                putExtra("extra_designation",  designation)
-                putExtra("extra_company_code", companyCode)
+    private fun startMqttPublishing() {
+        connectMqtt()
+        mqttPublishRunnable?.let { handler.removeCallbacks(it) }
+        mqttPublishRunnable = object : Runnable {
+            override fun run() {
+                if (isDestroyed) return
+                publishLocationToMqtt()
+                handler.postDelayed(this, MQTT_PUBLISH_INTERVAL)
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                applicationContext.startForegroundService(directIntent)
-            else
-                applicationContext.startService(directIntent)
-        } catch (e: Exception) {
-            debugPrint("⚠️ [Restart] Direct start failed: ${e.message}")
         }
+        handler.postDelayed(mqttPublishRunnable!!, MQTT_PUBLISH_INTERVAL)
+    }
 
-        val am = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        val restartIntent = Intent(applicationContext, ServiceRestartReceiver::class.java).apply {
-            action = ServiceRestartReceiver.ACTION_RESTART_SERVICE
-        }
-        val delays = longArrayOf(1_500L, 8_000L, 30_000L, 60_000L, 120_000L)
-        delays.forEachIndexed { index, delay ->
-            val pIntent = PendingIntent.getBroadcast(
-                applicationContext, 20 + index, restartIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-            val triggerAt = android.os.SystemClock.elapsedRealtime() + delay
+    private fun connectMqtt() {
+        ioExecutor.submit {
             try {
-                when {
-                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && am.canScheduleExactAlarms() ->
-                        am.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pIntent)
-                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ->
-                        am.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pIntent)
-                    else ->
-                        am.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pIntent)
+                if (isMqttConnected) return@submit
+                val clientId = "android-$userId-${UUID.randomUUID().toString().take(8)}"
+                val client   = MqttClient("tcp://$MQTT_HOST:$MQTT_PORT", clientId, MemoryPersistence())
+                client.setCallback(object : MqttCallback {
+                    override fun connectionLost(cause: Throwable?) {
+                        isMqttConnected = false
+                        handler.post { scheduleReconnect() }
+                    }
+                    override fun messageArrived(t: String?, m: MqttMessage?) {}
+                    override fun deliveryComplete(t: IMqttDeliveryToken?) {}
+                })
+                val opts = MqttConnectOptions().apply {
+                    isCleanSession       = true
+                    connectionTimeout    = 10
+                    keepAliveInterval    = 30
+                    isAutomaticReconnect = false
                 }
+                client.connect(opts)
+                mqttClient      = client
+                isMqttConnected = true
+                handler.post { updateServiceNotification("✅ Live tracking active") }
+                log("✅ [MQTT] Connected")
             } catch (e: Exception) {
-                debugPrint("⚠️ [Restart] Alarm $index failed: ${e.message}")
+                isMqttConnected = false
+                handler.post { scheduleReconnect() }
+                log("❌ [MQTT] Connect failed: ${e.message}")
             }
         }
-        debugPrint("✅ [Service] Restart alarms scheduled")
+    }
+
+    private fun disconnectMqtt() {
+        mqttReconnectRunnable?.let { handler.removeCallbacks(it) }
+        mqttReconnectRunnable = null
+        ioExecutor.submit {
+            try { if (mqttClient?.isConnected == true) mqttClient?.disconnect(0) } catch (_: Exception) {}
+            mqttClient = null; isMqttConnected = false
+        }
+    }
+
+    private fun scheduleReconnect() {
+        if (isDestroyed) return
+        mqttReconnectRunnable?.let { handler.removeCallbacks(it) }
+        mqttReconnectRunnable = Runnable { if (!isDestroyed && !isMqttConnected) connectMqtt() }
+        handler.postDelayed(mqttReconnectRunnable!!, MQTT_RECONNECT_DELAY)
+    }
+
+    private fun publishLocationToMqtt() {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (!prefs.getBoolean(KEY_IS_CLOCKED_IN, false)) return
+        if (prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)) return
+        if (lastLat == 0.0 && lastLon == 0.0) return
+        val payload = JSONObject().apply {
+            put("device_id",    userId)
+            put("company_code", companyCode.ifEmpty { DEFAULT_COMPANY_CODE })
+            put("emp_name",     bookerName)
+            put("dept_id",      designation)
+            put("lat",          lastLat)
+            put("lon",          lastLon)
+            put("accuracy",     lastAccuracy)
+            put("speed",        lastSpeed)
+            put("track_id",     System.currentTimeMillis())
+            put("timestamp",    SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault()).format(Date()))
+            put("source",       "android_foreground_service")
+        }.toString()
+        ioExecutor.submit {
+            try {
+                val client = mqttClient ?: return@submit
+                if (!client.isConnected) { handler.post { scheduleReconnect() }; return@submit }
+                val msg = MqttMessage(payload.toByteArray(Charsets.UTF_8)).apply {
+                    qos = 1; isRetained = false
+                }
+                client.publish("gps/${companyCode.ifEmpty { DEFAULT_COMPANY_CODE }}/$userId", msg)
+                mqttPublishCount++
+                handler.post { updateServiceNotification("✅ Live tracking • #$mqttPublishCount") }
+            } catch (e: Exception) {
+                isMqttConnected = false
+                handler.post { scheduleReconnect() }
+            }
+        }
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    // Critical events
+    // Permission / Location Check Loop
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private fun startPermissionCheckLoop() {
+        checkRunnable = object : Runnable {
+            override fun run() {
+                if (isDestroyed) return
+                checkPermissionsAndLocation()
+                handler.postDelayed(this, 30_000L)
+            }
+        }
+        handler.postDelayed(checkRunnable!!, 30_000L)
+    }
+
+    private fun checkPermissionsAndLocation() {
+        val prefs     = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val clockedIn = prefs.getBoolean(KEY_IS_CLOCKED_IN, false)
+        val isFrozen  = prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)
+        if (!clockedIn || isFrozen) return
+
+        val permOk = checkLocationPermission()
+        val locOn  = isLocationEnabled()
+
+        if (wasPermissionGranted && !permOk) {
+            val now = System.currentTimeMillis()
+            if (now - lastEventTime > 5_000L) {
+                lastEventTime   = now
+                lastEventReason = "System ClockOut - Permission Revoked"
+                handleCriticalEvent("System ClockOut - Permission Revoked")
+                return
+            }
+        }
+        if (wasLocationEnabled && !locOn) {
+            val now = System.currentTimeMillis()
+            if (now - lastEventTime > 5_000L) {
+                lastEventTime   = now
+                lastEventReason = "System ClockOut - Location Off"
+                handleCriticalEvent("System ClockOut - Location Off")
+                return
+            }
+        }
+        wasPermissionGranted = permOk
+        wasLocationEnabled   = locOn
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // Critical Events
     // ═════════════════════════════════════════════════════════════════════════
 
     private fun handleCriticalEvent(reason: String) = handleCriticalEventWithTime(reason, Date())
@@ -1135,13 +2085,13 @@ class LocationMonitorService : Service() {
     private fun handleCriticalEventWithTime(reason: String, eventTime: Date) {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         if (prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)) return
-
         saveCriticalEventToPrefs(prefs, reason, eventTime)
-        showCriticalNotification(reason, SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault()).format(eventTime))
-        updateNotification("⚠️ AUTO CLOCKOUT: $reason", true)
+        showCriticalNotification(reason,
+            SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault()).format(eventTime))
+        MidnightClockoutReceiver.cancel(this)
+        LocationUploadWorker.cancel(this)
         stopAllLoops()
         disconnectMqtt()
-        MidnightClockoutReceiver.cancel(this)
         try { (getSystemService(NotificationManager::class.java)).cancel(WORKING_NOTIFICATION_ID) } catch (_: Exception) {}
         try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) {}
         stopSelf()
@@ -1151,197 +2101,95 @@ class LocationMonitorService : Service() {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         if (!prefs.getBoolean(KEY_IS_CLOCKED_IN, false) ||
             prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)) return
-
         val now = System.currentTimeMillis()
         if (now - lastFakeGpsEventTime < FAKE_GPS_COOLDOWN_MS) return
         lastFakeGpsEventTime = now
-
-        val realLat = if (lastRealLat != 0.0) lastRealLat else lastLat
-        val realLon = if (lastRealLon != 0.0) lastRealLon else lastLon
-
         handler.post {
-            handleCriticalEventFakeGps(KEY_FAKE_GPS_REASON, fakeLat, fakeLng, realLat, realLon)
+            val prefs2   = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val ts       = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault()).format(Date())
+            val elapsed  = prefs2.getString(KEY_ELAPSED_TIME, "00:00:00") ?: "00:00:00"
+            val clockInT = prefs2.getString("flutter.clockInTime", "") ?: ""
+            prefs2.edit()
+                .putBoolean(KEY_HAS_CRITICAL_EVENT, true)
+                .putBoolean("has_critical_event_pending", true)
+                .putBoolean(KEY_IS_TIMER_FROZEN, true)
+                .putString(KEY_EVENT_TIMESTAMP,  ts)
+                .putString(KEY_EVENT_REASON,     "System ClockOut - Fake GPS Detected")
+                .putString("critical_event_reason", "System ClockOut - Fake GPS Detected")
+                .putBoolean(KEY_IS_CLOCKED_IN, false)
+                .putBoolean("isClockedIn", false)
+                .putBoolean(KEY_FAKE_GPS_DETECTED, true)
+                .putFloat("flutter.fake_gps_lat", fakeLat.toFloat())
+                .putFloat("flutter.fake_gps_lon", fakeLng.toFloat())
+                .putFloat("flutter.real_gps_lat", lastRealLat.toFloat())
+                .putFloat("flutter.real_gps_lon", lastRealLon.toFloat())
+                .putString("flutter.fastClockOutTime", ts)
+                .putFloat("flutter.fastClockOutDistance", 0f)
+                .putString("flutter.fastClockOutReason", "System ClockOut - Fake GPS Detected")
+                .putBoolean("flutter.hasFastClockOutData", true)
+                .putBoolean("flutter.clockOutPending", true)
+                .putString("flutter.fastClockOutData",
+                    """{"fast_attendanceId":"","fast_userId":"$userId","fast_clockOutTime":"$ts","fast_totalTime":"$elapsed","fast_totalDistance":0.0,"fast_latOut":${lastRealLat},"fast_lngOut":${lastRealLon},"fast_address":"","fast_reason":"System ClockOut - Fake GPS Detected","fast_savedAt":"${System.currentTimeMillis()}","fast_clockInTime":"$clockInT"}""")
+                .commit()
+            showCriticalNotification("System ClockOut - Fake GPS Detected", ts)
+            MidnightClockoutReceiver.cancel(this)
+            LocationUploadWorker.cancel(this)
+            stopAllLoops()
+            disconnectMqtt()
+            try { (getSystemService(NotificationManager::class.java)).cancel(WORKING_NOTIFICATION_ID) } catch (_: Exception) {}
+            try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) {}
+            stopSelf()
         }
     }
 
-    private fun handleCriticalEventFakeGps(
-        reason: String, fakeLat: Double, fakeLng: Double, realLat: Double, realLng: Double
-    ) {
-        if (isDestroyed) return
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        saveCriticalEventToPrefsWithFakeGps(prefs, reason, fakeLat, fakeLng, realLat, realLng)
-        showCriticalNotification(reason, SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault()).format(Date()))
-        updateNotification("⚠️ AUTO CLOCKOUT: $reason", true)
-        stopAllLoops()
-        disconnectMqtt()
-        MidnightClockoutReceiver.cancel(this)
-        try { (getSystemService(NotificationManager::class.java)).cancel(WORKING_NOTIFICATION_ID) } catch (_: Exception) {}
-        try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) {}
-        stopSelf()
-    }
-
-    private fun saveCriticalEventToPrefsWithFakeGps(
-        prefs: android.content.SharedPreferences, reason: String,
-        fakeLat: Double, fakeLng: Double, realLat: Double, realLng: Double,
+    private fun saveCriticalEventToPrefs(
+        prefs: android.content.SharedPreferences,
+        reason: String,
         eventTime: Date = Date()
     ) {
-        val timestamp = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault()).format(eventTime)
-        val elapsed   = prefs.getString(KEY_ELAPSED_TIME, "00:00:00") ?: "00:00:00"
-        val clockInT  = prefs.getString("flutter.clockInTime", "") ?: ""
-
+        val ts       = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault()).format(eventTime)
+        val elapsed  = prefs.getString(KEY_ELAPSED_TIME, "00:00:00") ?: "00:00:00"
+        val clockInT = prefs.getString("flutter.clockInTime", "") ?: ""
         prefs.edit()
             .putBoolean(KEY_HAS_CRITICAL_EVENT, true)
             .putBoolean("has_critical_event_pending", true)
             .putBoolean(KEY_IS_TIMER_FROZEN, true)
-            .putString(KEY_EVENT_TIMESTAMP, timestamp)
+            .putString(KEY_EVENT_TIMESTAMP, ts)
             .putString(KEY_EVENT_REASON, reason)
             .putString("critical_event_reason", reason)
-            .putString(KEY_FROZEN_TIME, "00:00:00")
             .putFloat(KEY_EVENT_DISTANCE, 0f)
             .putFloat(KEY_EVENT_LAT, 0f)
             .putFloat(KEY_EVENT_LNG, 0f)
             .putBoolean(KEY_IS_CLOCKED_IN, false)
             .putBoolean("isClockedIn", false)
             .putBoolean("flutter.pending_gpx_close", true)
-            .putString("flutter.fastClockOutTime", timestamp)
-            .putFloat("flutter.fastClockOutDistance", 0f)
-            .putString("flutter.fastClockOutReason", reason)
-            .putBoolean("flutter.hasFastClockOutData", true)
-            .putBoolean("flutter.clockOutPending", true)
-            .putBoolean(KEY_FAKE_GPS_DETECTED, true)
-            .putFloat("flutter.fake_gps_lat", fakeLat.toFloat())
-            .putFloat("flutter.fake_gps_lon", fakeLng.toFloat())
-            .putFloat("flutter.real_gps_lat", realLat.toFloat())
-            .putFloat("flutter.real_gps_lon", realLng.toFloat())
-            .putString("flutter.fastClockOutData",
-                """{"fast_attendanceId":"","fast_userId":"$userId","fast_clockOutTime":"$timestamp","fast_totalTime":"$elapsed","fast_totalDistance":0.0,"fast_latOut":${realLat},"fast_lngOut":${realLng},"fast_address":"","fast_reason":"$reason","fast_savedAt":"${System.currentTimeMillis()}","fast_clockInTime":"$clockInT"}""")
-            .putString(KEY_BG_CLOCKOUT_PAYLOAD,
-                """{"timestamp":"$timestamp","reason":"$reason","elapsed_at_event":"$elapsed","distance":0.0,"fake_latitude":$fakeLat,"fake_longitude":$fakeLng,"real_latitude":$realLat,"real_longitude":$realLng,"source":"fake_gps"}""")
-            .commit()
-    }
-
-    private fun saveCriticalEventToPrefs(
-        prefs: android.content.SharedPreferences, reason: String, eventTime: Date = Date()
-    ) {
-        val timestamp = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault()).format(eventTime)
-        val elapsed   = prefs.getString(KEY_ELAPSED_TIME, "00:00:00") ?: "00:00:00"
-        val clockInT  = prefs.getString("flutter.clockInTime", "") ?: ""
-
-        prefs.edit()
-            .putBoolean(KEY_HAS_CRITICAL_EVENT, true)
-            .putBoolean(KEY_IS_TIMER_FROZEN, true)
-            .putString(KEY_EVENT_TIMESTAMP, timestamp)
-            .putString(KEY_EVENT_REASON, reason)
-            .putString(KEY_FROZEN_TIME, "00:00:00")
-            .putFloat(KEY_EVENT_DISTANCE, 0f)
-            .putFloat(KEY_EVENT_LAT, 0f)
-            .putFloat(KEY_EVENT_LNG, 0f)
-            .putBoolean(KEY_IS_CLOCKED_IN, false)
-            .putBoolean("flutter.pending_gpx_close", true)
-            .putString("flutter.fastClockOutTime", timestamp)
+            .putString("flutter.fastClockOutTime", ts)
             .putFloat("flutter.fastClockOutDistance", 0f)
             .putString("flutter.fastClockOutReason", reason)
             .putBoolean("flutter.hasFastClockOutData", true)
             .putBoolean("flutter.clockOutPending", true)
             .putString("flutter.fastClockOutData",
-                """{"fast_attendanceId":"","fast_userId":"$userId","fast_clockOutTime":"$timestamp","fast_totalTime":"$elapsed","fast_totalDistance":0.0,"fast_latOut":0.0,"fast_lngOut":0.0,"fast_address":"","fast_reason":"$reason","fast_savedAt":"${System.currentTimeMillis()}","fast_clockInTime":"$clockInT"}""")
+                """{"fast_attendanceId":"","fast_userId":"$userId","fast_clockOutTime":"$ts","fast_totalTime":"$elapsed","fast_totalDistance":0.0,"fast_latOut":0.0,"fast_lngOut":0.0,"fast_address":"","fast_reason":"$reason","fast_savedAt":"${System.currentTimeMillis()}","fast_clockInTime":"$clockInT"}""")
             .putString(KEY_BG_CLOCKOUT_PAYLOAD,
-                """{"timestamp":"$timestamp","reason":"$reason","elapsed_at_event":"$elapsed","distance":0.0,"latitude":0.0,"longitude":0.0,"source":"critical_event"}""")
+                """{"timestamp":"$ts","reason":"$reason","elapsed_at_event":"$elapsed","distance":0.0,"latitude":0.0,"longitude":0.0}""")
             .commit()
-
-        debugPrint("💾 [Critical] Saved: reason=$reason ts=$timestamp")
+        log("💾 [Critical] Saved: reason=$reason ts=$ts")
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    // Location + Permission checks
-    // ═════════════════════════════════════════════════════════════════════════
-
-    private fun checkLocationAndPermission() {
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        isClockedIn = prefs.getBoolean(KEY_IS_CLOCKED_IN, false)
-
-        if (!isClockedIn) {
-            updateNotification("Not clocked in", false)
-            return
-        }
-
-        val isFrozen = prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)
-        if (isFrozen) {
-            checkRunnable?.let { handler.removeCallbacks(it) }
-            return
-        }
-
-        val currentLocEnabled  = isLocationEnabled()
-        val currentPermGranted = checkLocationPermission()
-
-        if (wasPermissionGranted && !currentPermGranted) {
-            val now = System.currentTimeMillis()
-            if (now - lastEventTime > 5000 && lastEventReason != "System ClockOut - Permission Revoked") {
-                lastEventTime   = now
-                lastEventReason = "System ClockOut - Permission Revoked"
-                handleCriticalEventWithTime("System ClockOut - Permission Revoked", Date())
-                return
-            }
-        }
-
-        if (wasLocationEnabled && !currentLocEnabled) {
-            val now = System.currentTimeMillis()
-            if (now - lastEventTime > 5000 && lastEventReason != "System ClockOut - Location Off") {
-                lastEventTime   = now
-                lastEventReason = "System ClockOut - Location Off"
-                handleCriticalEventWithTime("System ClockOut - Location Off", Date())
-                return
-            }
-        }
-
-        wasLocationEnabled   = currentLocEnabled
-        wasPermissionGranted = currentPermGranted
-
-        if (isMqttConnected) {
-            updateNotification("✅ Live tracking • #$mqttPublishCount sent", false)
-        } else {
-            updateNotification("❌ MQTT offline — reconnecting…", false)
-        }
-    }
-
-    private fun instantCheckAndHandlePermissionRevoke() {
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        if (!prefs.getBoolean(KEY_IS_CLOCKED_IN, false) ||
-            prefs.getBoolean(KEY_IS_TIMER_FROZEN, false)) return
-        if (!checkLocationPermission()) {
-            val now = System.currentTimeMillis()
-            if (now - lastEventTime > 5000 || lastEventReason != "System ClockOut - Permission Revoked") {
-                lastEventTime   = now
-                lastEventReason = "System ClockOut - Permission Revoked"
-                handleCriticalEventWithTime("System ClockOut - Permission Revoked", Date())
-            }
-        }
-    }
-
-    // ═════════════════════════════════════════════════════════════════════════
-    // Broadcast receivers
+    // Broadcast Receivers
     // ═════════════════════════════════════════════════════════════════════════
 
     private val locationModeReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == SysLocationManager.MODE_CHANGED_ACTION)
-                handler.post { checkLocationAndPermission() }
-        }
-    }
-
-    private val packageReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            val pkg = intent?.data?.schemeSpecificPart
-            if (pkg == null || pkg == packageName)
-                handler.post { instantCheckAndHandlePermissionRevoke() }
-            else
-                handler.post { checkLocationAndPermission() }
+            if (intent?.action == LocationManager.MODE_CHANGED_ACTION)
+                handler.post { checkPermissionsAndLocation() }
         }
     }
 
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            handler.post { checkLocationAndPermission() }
+            handler.post { checkPermissionsAndLocation() }
         }
     }
 
@@ -1350,154 +2198,105 @@ class LocationMonitorService : Service() {
     }
 
     private fun registerReceivers() {
-        registerReceiver(locationModeReceiver, IntentFilter(SysLocationManager.MODE_CHANGED_ACTION))
-        val packageFilter = IntentFilter().apply {
-            addAction(Intent.ACTION_PACKAGE_CHANGED)
-            addAction(Intent.ACTION_PACKAGE_REMOVED)
-            addDataScheme("package")
-        }
-        registerReceiver(packageReceiver, packageFilter)
+        registerReceiver(locationModeReceiver, IntentFilter(LocationManager.MODE_CHANGED_ACTION))
         registerReceiver(screenReceiver, IntentFilter(Intent.ACTION_SCREEN_ON))
-        val timeFilter = IntentFilter().apply {
+        val tf = IntentFilter().apply {
             addAction(Intent.ACTION_TIME_CHANGED)
             addAction(Intent.ACTION_DATE_CHANGED)
             addAction(Intent.ACTION_TIMEZONE_CHANGED)
         }
-        registerReceiver(dateTimeChangeReceiver, timeFilter)
-    }
-
-    private fun registerAppOpsListener() {
-        try {
-            appOpsManager = getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
-            val listener = AppOpsManager.OnOpChangedListener { _, pkg ->
-                if (pkg == packageName) handler.post { instantCheckAndHandlePermissionRevoke() }
-                else handler.post { checkLocationAndPermission() }
-            }
-            appOpsManager?.startWatchingMode(AppOpsManager.OPSTR_FINE_LOCATION, packageName, listener)
-            appOpsCallback = listener
-        } catch (e: Exception) {
-            debugPrint("⚠️ [AppOps] Register failed: ${e.message}")
-        }
-    }
-
-    private fun unregisterAppOpsListener() {
-        try {
-            appOpsCallback?.let { appOpsManager?.stopWatchingMode(it); appOpsCallback = null }
-        } catch (_: Exception) {}
+        registerReceiver(dateTimeChangeReceiver, tf)
     }
 
     private fun registerNetworkCallback() {
         try {
             connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-            val request = NetworkRequest.Builder()
-                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                .build()
+            val req = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).build()
             networkCallback = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
                     handler.post {
-                        if (!isDestroyed && !isMqttConnected) {
-                            mqttReconnectRunnable?.let { handler.removeCallbacks(it) }
-                            connectMqtt()
+                        if (!isDestroyed && !isMqttConnected) connectMqtt()
+                        ioExecutor.submit {
+                            gpsPolicy = GpsPolicyManager.fetchPolicy(
+                                this@LocationMonitorService, forceRefresh = true)
                         }
-                        onNetworkRestored()
                     }
                 }
                 override fun onLost(network: Network) {
                     isMqttConnected = false
-                    handler.post { updateNotification("❌ MQTT offline — no internet…", false) }
+                    handler.post { updateServiceNotification("❌ MQTT offline — no internet") }
                 }
             }
-            connectivityManager?.registerNetworkCallback(request, networkCallback!!)
-        } catch (e: Exception) {
-            debugPrint("⚠️ [Network] registerNetworkCallback failed: ${e.message}")
-        }
+            connectivityManager?.registerNetworkCallback(req, networkCallback!!)
+        } catch (e: Exception) { log("⚠️ [Network] Callback reg failed: ${e.message}") }
     }
 
     private fun unregisterNetworkCallback() {
+        try { networkCallback?.let { connectivityManager?.unregisterNetworkCallback(it) } } catch (_: Exception) {}
+        networkCallback = null
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // WakeLock helpers
+    // ═════════════════════════════════════════════════════════════════════════
+
+    // ── Persistent WakeLock (held for entire service lifetime) ────────────────
+    // PARTIAL_WAKE_LOCK: screen OFF is fine, CPU stays ON.
+    // This prevents the OS from putting the CPU to sleep while GPS is running.
+    // Must be held continuously — releasing it even briefly can drop GPS fixes.
+    private fun acquirePersistentWakeLock() {
         try {
-            networkCallback?.let { connectivityManager?.unregisterNetworkCallback(it); networkCallback = null }
+            if (persistentWakeLock?.isHeld == true) return  // already held
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            persistentWakeLock = pm.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "BookIT::LocationServiceWakeLock"
+            ).also {
+                it.setReferenceCounted(false)
+                // 12-hour hard timeout — covers a full work shift.
+                // If the user is still clocked in after 12 h the service's
+                // onStartCommand re-acquires the lock on the next START_STICKY restart,
+                // so continuous operation beyond 12 h is still supported.
+                val TWELVE_HOURS_MS = 12L * 60L * 60L * 1000L
+                it.acquire(TWELVE_HOURS_MS)
+            }
+            log("✅ [WakeLock] Persistent lock acquired (12-hour timeout)")
+        } catch (e: Exception) {
+            log("⚠️ [WakeLock] Persistent lock failed: ${e.message}")
+        }
+    }
+
+    private fun releasePersistentWakeLock() {
+        try {
+            if (persistentWakeLock?.isHeld == true) persistentWakeLock?.release()
+            persistentWakeLock = null
+            log("✅ [WakeLock] Persistent lock released")
         } catch (_: Exception) {}
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
-    // Helpers
-    // ═════════════════════════════════════════════════════════════════════════
-
-    private fun getStringPref(prefs: android.content.SharedPreferences, vararg keys: String): String {
-        for (key in keys) {
-            val v = prefs.getString(key, "")
-            if (!v.isNullOrEmpty()) return v
-        }
-        return ""
-    }
-
-    private fun isLocationEnabled(): Boolean {
+    // ── Short WakeLock (timed, for DB writes) ─────────────────────────────────
+    private fun acquireShortWakeLock(tag: String, timeoutMs: Long): PowerManager.WakeLock? {
         return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                (getSystemService(Context.LOCATION_SERVICE) as SysLocationManager).isLocationEnabled
-            } else {
-                @Suppress("DEPRECATION")
-                Settings.Secure.getInt(contentResolver, Settings.Secure.LOCATION_MODE) != Settings.Secure.LOCATION_MODE_OFF
-            }
-        } catch (_: Exception) { false }
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, tag).also { it.acquire(timeoutMs) }
+        } catch (e: Exception) { log("⚠️ [WakeLock] $tag failed: ${e.message}"); null }
     }
 
-    private fun checkLocationPermission(): Boolean {
-        return try {
-            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
-                    ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        } catch (_: Exception) { false }
+    private fun releaseWakeLock(wl: PowerManager.WakeLock?) {
+        try { if (wl?.isHeld == true) wl.release() } catch (_: Exception) {}
     }
 
-    private fun debugPrint(msg: String) = android.util.Log.d("LocationMonitor", msg)
+    // ═════════════════════════════════════════════════════════════════════════
+    // Notifications
+    // ═════════════════════════════════════════════════════════════════════════
 
-    // ─── Working Timer ────────────────────────────────────────────────────────
-
-    private fun startWorkingTimer() {
-        workingTimerRunnable?.let { handler.removeCallbacks(it) }
-        workingTimerRunnable = object : Runnable {
-            override fun run() {
-                if (isDestroyed) return
-                workingSeconds++
-                val hours   = workingSeconds / 3600
-                val minutes = (workingSeconds % 3600) / 60
-                val secs    = workingSeconds % 60
-                updateWorkingNotification("%02d:%02d:%02d".format(hours, minutes, secs))
-                if (!isDestroyed) handler.postDelayed(this, 1000L)
-            }
-        }
-        handler.postDelayed(workingTimerRunnable!!, 1000L)
-        debugPrint("✅ [Timer] Working timer started at $workingSeconds seconds")
-    }
-
-    private fun updateWorkingNotification(timeStr: String) {
-        val pi = PendingIntent.getActivity(
-            this, 1,
-            packageManager.getLaunchIntentForPackage(packageName),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-        val n = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Working")
-            .setContentText("Time: $timeStr")
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentIntent(pi)
-            .setOngoing(true)
-            .setSilent(true)
-            .build()
-        try {
-            (getSystemService(NotificationManager::class.java)).notify(WORKING_NOTIFICATION_ID, n)
-        } catch (e: Exception) {
-            debugPrint("⚠️ [Timer] Notification update failed: ${e.message}")
-        }
-    }
-
-    // ─── Notifications ────────────────────────────────────────────────────────
-
-    private fun createNotificationChannel() {
+    private fun createNotificationChannels() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
-            NotificationChannel(CHANNEL_ID, "Location Monitor Service", NotificationManager.IMPORTANCE_HIGH).apply {
+            NotificationChannel(CHANNEL_ID, "Location Monitor",
+                NotificationManager.IMPORTANCE_LOW).apply {
                 description = "Monitors location for attendance tracking"
                 setShowBadge(false)
                 enableVibration(false)
@@ -1505,7 +2304,8 @@ class LocationMonitorService : Service() {
             }
         )
         nm.createNotificationChannel(
-            NotificationChannel(URGENT_CHANNEL_ID, "URGENT Auto Clockout", NotificationManager.IMPORTANCE_HIGH).apply {
+            NotificationChannel(URGENT_CHANNEL_ID, "URGENT Auto Clockout",
+                NotificationManager.IMPORTANCE_HIGH).apply {
                 enableVibration(true)
                 vibrationPattern = longArrayOf(0, 1000, 500, 1000)
                 enableLights(true)
@@ -1514,37 +2314,44 @@ class LocationMonitorService : Service() {
         )
     }
 
-    private fun buildNotification(): Notification {
-        val pi = PendingIntent.getActivity(
-            this, 0,
+    private fun buildServiceNotification(text: String): Notification {
+        val pi = PendingIntent.getActivity(this, 0,
             packageManager.getLaunchIntentForPackage(packageName),
-            PendingIntent.FLAG_IMMUTABLE
-        )
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("BookIT Attendance Active")
-            .setContentText("⏳ Starting tracking…")
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentIntent(pi)
-            .setOngoing(true)
-            .setSilent(true)
-            .setPriority(NotificationCompat.PRIORITY_MAX)  // Keep this
-            // Remove .setForegroundServiceBehavior - it requires higher SDK
-            .build()
-    }
-
-    private fun updateNotification(text: String, isAlert: Boolean) {
-        val pi = PendingIntent.getActivity(this, 0, packageManager.getLaunchIntentForPackage(packageName),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        val n = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(if (isAlert) "⚠️ ATTENTION REQUIRED" else "BookIT Attendance Active")
             .setContentText(text)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentIntent(pi)
             .setOngoing(true)
-            .setSilent(!isAlert)
-            .apply { if (isAlert) setColor(android.graphics.Color.RED) }
+            .setSilent(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
+    }
+
+    private fun updateServiceNotification(text: String) {
+        if (isDestroyed) return
+        val n = buildServiceNotification(text)
         (getSystemService(NotificationManager::class.java)).notify(NOTIFICATION_ID, n)
+    }
+
+    private fun updateWorkingTimerNotification(timeStr: String) {
+        if (isDestroyed) return
+        val pi = PendingIntent.getActivity(this, 1,
+            packageManager.getLaunchIntentForPackage(packageName),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val n = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("Working Time")
+            .setContentText("⏱ $timeStr")
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentIntent(pi)
+            .setOngoing(true)
+            .setSilent(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
+        try {
+            (getSystemService(NotificationManager::class.java)).notify(WORKING_NOTIFICATION_ID, n)
+        } catch (_: Exception) {}
     }
 
     private fun showCriticalNotification(reason: String, time: String) {
@@ -1557,8 +2364,7 @@ class LocationMonitorService : Service() {
         val pi = PendingIntent.getActivity(this, 0,
             packageManager.getLaunchIntentForPackage(packageName)?.apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            },
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+            }, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val n = NotificationCompat.Builder(this, URGENT_CHANNEL_ID)
             .setContentTitle(title)
             .setContentText("Auto clockout at $time. Open app to sync.")
@@ -1571,202 +2377,27 @@ class LocationMonitorService : Service() {
             .build()
         (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(9998, n)
     }
-}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// NativeDBHelper
-// ─────────────────────────────────────────────────────────────────────────────
+    // ═════════════════════════════════════════════════════════════════════════
+    // Helpers
+    // ═════════════════════════════════════════════════════════════════════════
 
-class NativeDBHelper(context: Context) :
-    SQLiteOpenHelper(context, "bookIt.db", null, 1) {
-
-    override fun onCreate(db: SQLiteDatabase) {
-        db.execSQL(
-            """CREATE TABLE IF NOT EXISTS location_tracking (
-                locationtracking_id   TEXT PRIMARY KEY,
-                locationtracking_date TEXT,
-                locationtracking_time TEXT,
-                user_id               TEXT,
-                lat_in                TEXT,
-                lng_in                TEXT,
-                booker_name           TEXT,
-                designation           TEXT,
-                posted                INTEGER DEFAULT 0,
-                company_code          TEXT DEFAULT ''
-            )"""
-        )
-    }
-
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {}
-
-    fun insertLocationRow(
-        id: String, date: String, time: String,
-        userId: String, lat: String, lng: String,
-        bookerName: String, designation: String, companyCode: String
-    ) {
-        val cv = ContentValues().apply {
-            put("locationtracking_id",   id)
-            put("locationtracking_date", date)
-            put("locationtracking_time", time)
-            put("user_id",               userId)
-            put("lat_in",                lat)
-            put("lng_in",                lng)
-            put("booker_name",           bookerName)
-            put("designation",           designation)
-            put("posted",                0)
-            put("company_code",          companyCode)
+    private fun isLocationEnabled(): Boolean = try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            (getSystemService(Context.LOCATION_SERVICE) as LocationManager).isLocationEnabled
+        } else {
+            @Suppress("DEPRECATION")
+            Settings.Secure.getInt(contentResolver, Settings.Secure.LOCATION_MODE) !=
+                    Settings.Secure.LOCATION_MODE_OFF
         }
-        writableDatabase.insertWithOnConflict("location_tracking", null, cv, SQLiteDatabase.CONFLICT_IGNORE)
-    }
+    } catch (_: Exception) { false }
 
-    fun getUnpostedRows(): List<Map<String, String>> {
-        val rows   = mutableListOf<Map<String, String>>()
-        val cursor = readableDatabase.rawQuery(
-            "SELECT * FROM location_tracking WHERE posted = 0 ORDER BY locationtracking_date, locationtracking_time", null
-        )
-        cursor.use {
-            while (it.moveToNext()) {
-                val row = mutableMapOf<String, String>()
-                for (i in 0 until it.columnCount) row[it.getColumnName(i)] = it.getString(i) ?: ""
-                rows.add(row)
-            }
-        }
-        return rows
-    }
+    private fun checkLocationPermission() = try {
+        ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==
+                PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) ==
+                PackageManager.PERMISSION_GRANTED
+    } catch (_: Exception) { false }
 
-    fun markPosted(ids: List<String>) {
-        if (ids.isEmpty()) return
-        writableDatabase.execSQL(
-            "UPDATE location_tracking SET posted = 1 WHERE locationtracking_id IN (${ids.joinToString(",") { "?" }})",
-            ids.toTypedArray()
-        )
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// MidnightClockoutReceiver
-// ─────────────────────────────────────────────────────────────────────────────
-
-class MidnightClockoutReceiver : BroadcastReceiver() {
-
-    companion object {
-        const val ACTION_MIDNIGHT_CLOCKOUT = "com.metaxperts.order_booking_app.MIDNIGHT_CLOCKOUT"
-
-        fun schedule(context: Context) {
-            val prefs     = context.getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
-            val clockedIn = prefs.getBoolean("flutter.isClockedIn", false)
-            val isFrozen  = prefs.getBoolean("flutter.is_timer_frozen", false)
-            if (!clockedIn || isFrozen) return
-
-            val am     = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-            val intent = Intent(context, MidnightClockoutReceiver::class.java).apply { action = ACTION_MIDNIGHT_CLOCKOUT }
-            val pi     = PendingIntent.getBroadcast(context, 2200, intent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-
-            val now    = java.util.Calendar.getInstance()
-            val target = java.util.Calendar.getInstance().apply {
-                set(java.util.Calendar.HOUR_OF_DAY, 22)
-                set(java.util.Calendar.MINUTE, 0)
-                set(java.util.Calendar.SECOND, 0)
-                set(java.util.Calendar.MILLISECOND, 0)
-            }
-            if (now.after(target)) target.add(java.util.Calendar.DAY_OF_MONTH, 1)
-
-            try {
-                when {
-                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && am.canScheduleExactAlarms() ->
-                        am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, target.timeInMillis, pi)
-                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ->
-                        am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, target.timeInMillis, pi)
-                    else ->
-                        am.set(AlarmManager.RTC_WAKEUP, target.timeInMillis, pi)
-                }
-                android.util.Log.d("MidnightClockout", "✅ Alarm scheduled for ${target.time}")
-            } catch (e: Exception) {
-                android.util.Log.d("MidnightClockout", "⚠️ Alarm schedule failed: ${e.message}")
-            }
-        }
-
-        fun cancel(context: Context) {
-            try {
-                val am     = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-                val intent = Intent(context, MidnightClockoutReceiver::class.java).apply { action = ACTION_MIDNIGHT_CLOCKOUT }
-                val pi     = PendingIntent.getBroadcast(context, 2200, intent,
-                    PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE)
-                pi?.let { am.cancel(it) }
-            } catch (e: Exception) {
-                android.util.Log.d("MidnightClockout", "⚠️ Alarm cancel failed: ${e.message}")
-            }
-        }
-    }
-
-    override fun onReceive(context: Context, intent: Intent?) {
-        if (intent?.action != ACTION_MIDNIGHT_CLOCKOUT) return
-
-        val prefs     = context.getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
-        val clockedIn = prefs.getBoolean("flutter.isClockedIn", false)
-        val isFrozen  = prefs.getBoolean("flutter.is_timer_frozen", false)
-
-        if (!clockedIn || isFrozen) return
-
-        val now       = java.util.Date()
-        val timestamp = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault()).format(now)
-        val reason    = "System ClockOut - 10:00 PM"
-        val userId    = prefs.getString("flutter.userId", "")   ?: ""
-        val elapsed   = prefs.getString("flutter.elapsed_time", "00:00:00") ?: "00:00:00"
-        val clockInT  = prefs.getString("flutter.clockInTime", "") ?: ""
-
-        prefs.edit()
-            .putBoolean("flutter.has_critical_event_pending", true)
-            .putBoolean("has_critical_event_pending", true)
-            .putString("flutter.critical_event_reason", reason)
-            .putString("critical_event_reason", reason)
-            .putString("flutter.critical_event_timestamp", timestamp)
-            .putBoolean("flutter.is_timer_frozen", true)
-            .putBoolean("flutter.isClockedIn", false)
-            .putBoolean("isClockedIn", false)
-            .putString("flutter.fastClockOutTime", timestamp)
-            .putFloat("flutter.fastClockOutDistance", 0f)
-            .putString("flutter.fastClockOutReason", reason)
-            .putBoolean("flutter.hasFastClockOutData", true)
-            .putBoolean("flutter.clockOutPending", true)
-            .putString("flutter.fastClockOutData",
-                """{"fast_attendanceId":"","fast_userId":"$userId","fast_clockOutTime":"$timestamp","fast_totalTime":"$elapsed","fast_totalDistance":0.0,"fast_latOut":0.0,"fast_lngOut":0.0,"fast_address":"","fast_reason":"$reason","fast_savedAt":"${System.currentTimeMillis()}","fast_clockInTime":"$clockInT"}""")
-            .commit()
-
-        try { context.stopService(Intent(context, LocationMonitorService::class.java)) } catch (_: Exception) {}
-        showMidnightNotification(context, timestamp)
-    }
-
-    private fun showMidnightNotification(context: Context, time: String) {
-        try {
-            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                nm.createNotificationChannel(
-                    NotificationChannel("urgent_auto_clockout_channel", "URGENT Auto Clockout", NotificationManager.IMPORTANCE_HIGH).apply {
-                        enableVibration(true)
-                        vibrationPattern = longArrayOf(0, 1000, 500, 1000)
-                        enableLights(true)
-                        lightColor = android.graphics.Color.RED
-                    }
-                )
-            }
-            val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)?.apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            }
-            val pi = PendingIntent.getActivity(context, 0, launchIntent,
-                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-            val n = NotificationCompat.Builder(context, "urgent_auto_clockout_channel")
-                .setContentTitle("⏰ Auto Clock-Out at 10:00 PM")
-                .setContentText("You were automatically clocked out. Open app to sync.")
-                .setSmallIcon(R.mipmap.ic_launcher)
-                .setPriority(NotificationCompat.PRIORITY_MAX)
-                .setCategory(NotificationCompat.CATEGORY_ALARM)
-                .setAutoCancel(true)
-                .setContentIntent(pi)
-                .setVibrate(longArrayOf(0, 1000, 500, 1000))
-                .build()
-            nm.notify(9997, n)
-        } catch (_: Exception) {}
-    }
+    private fun log(msg: String) = android.util.Log.d("LocationMonitor", msg)
 }
