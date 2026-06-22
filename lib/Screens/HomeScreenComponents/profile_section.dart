@@ -223,7 +223,7 @@ class _ProfileSectionState extends State<ProfileSection> {
                     radius: 50,
                     backgroundImage: _profileImagePath != null
                         ? FileImage(File(_profileImagePath!))
-                        : const AssetImage('assets/icons/avator8.png') as ImageProvider,
+                        : const AssetImage('assets/icons/BookIt Profile Png.png') as ImageProvider,
                   ),
                   Container(
                     padding: const EdgeInsets.all(4),

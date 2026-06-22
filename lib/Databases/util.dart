@@ -111,7 +111,7 @@ const String fakeGpsTable = 'fake_gps_logs';
 //     }
 //   }
 //   return false;
-String  version="v0.3.9";
+String  version="v0.4.1";
 dynamic shopAddress = "";
 
 Future<bool> isNetworkAvailable() async {
